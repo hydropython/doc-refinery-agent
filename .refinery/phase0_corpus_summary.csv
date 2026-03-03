@@ -1,0 +1,5 @@
+institution,folder,file_count,format_type,strategy
+AUDIT,refined_audit,10,Mixed,Strategy B (Layout-Aware)
+CBE,refined_cbe,17,Mixed,Strategy B (Layout-Aware)
+FTA,refined_fta,16,Mixed,Strategy B (Layout-Aware)
+TAX,refined_tax,6,Mixed,Strategy B (Layout-Aware)

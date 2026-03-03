@@ -5,13 +5,24 @@ __pycache__/
 .venv/
 venv/
 ENV/
+.python-version
 
-# Project Specific
-data/                   # Don't push raw client PDFs
-.refinery/profiles/     # Local run artifacts
-.refinery/extraction_ledger.jsonl
-.refinery/pageindex/
+# Project Specific - KEEP THESE (required deliverables)
+# .refinery/profiles/              ← KEEP (49 JSON files, ~50KB)
+# .refinery/extraction_ledger.jsonl ← KEEP (49 entries, ~20KB)
+# .refinery/*.csv                   ← KEEP (metrics, ~50KB)
+
+# Project Specific - EXCLUDE THESE (too large)
+.refinery_db/                       # Vector store (regenerable)
+output/refined/*.md                 # Generated markdown (regenerable)
+*.log                               # Log files (regenerable)
+image.png                           # Large images
+data/                               # Raw PDFs (client data)
 
 # OS
 .DS_Store
 Thumbs.db
+
+# IDE
+.vscode/
+.idea/
