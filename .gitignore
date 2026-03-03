@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+
+# Project Specific
+data/                   # Don't push raw client PDFs
+.refinery/profiles/     # Local run artifacts
+.refinery/extraction_ledger.jsonl
+.refinery/pageindex/
+
+# OS
+.DS_Store
+Thumbs.db
