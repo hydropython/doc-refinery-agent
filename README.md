@@ -207,6 +207,7 @@ quality:
 ```
 
 # Project Structure
+```
 doc-refinery-agent/
 ├── src/
 │   ├── agents/
@@ -240,6 +241,7 @@ doc-refinery-agent/
 ├── pyproject.toml
 ├── DOMAIN_NOTES.md
 └── README.md
+```
 
 # License
 MIT License
