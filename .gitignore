@@ -6,12 +6,19 @@ __pycache__/
 venv/
 ENV/
 
-# Project Specific
+# Project Specific - KEEP THESE
 data/                   # Don't push raw client PDFs
-.refinery/profiles/     # Local run artifacts
-.refinery/extraction_ledger.jsonl
-.refinery/pageindex/
+
+# Project Specific - EXCLUDE THESE (too large)
+.refinery_db/           # Vector store (regenerable)
+output/refined/*.md     # Generated markdown (regenerable)
+*.log                   # Log files (regenerable)
+image.png               # Large images
 
 # OS
 .DS_Store
 Thumbs.db
+
+# IDE
+.vscode/
+.idea/
