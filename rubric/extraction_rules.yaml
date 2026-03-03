@@ -1,0 +1,159 @@
+# Document Intelligence Refinery - Extraction Rules
+# Based on empirical analysis of 49 documents (2026-03-03)
+# Modify this file to onboard new document types without code changes
+
+version: "1.0"
+created_at: "2026-03-03"
+corpus_analyzed: 49
+
+# =============================================================================
+# TRIAGE THRESHOLDS
+# =============================================================================
+triage:
+  # Detect scanned vs. digital PDFs
+  origin_type:
+    scanned_image:
+      max_text_chars: 50
+      min_images: 1
+    native_digital:
+      min_text_chars: 1000
+      max_images: 0
+    mixed:
+      min_text_chars: 50
+      max_text_chars: 1000
+  
+  # Detect layout complexity
+  layout_complexity:
+    table_heavy:
+      min_tables: 2
+    single_column:
+      max_columns: 1
+    multi_column:
+      min_columns: 2
+
+# =============================================================================
+# EXTRACTION STRATEGIES
+# =============================================================================
+strategies:
+  strategy_a_fast_text:
+    name: "Fast Text Extraction"
+    tool: "pdfplumber"
+    cost_per_page_usd: 0.00
+    triggers:
+      - origin_type: native_digital
+      - layout_complexity: single_column
+    confidence_gate: 0.85
+    escalation_trigger: 0.70
+  
+  strategy_b_layout_aware:
+    name: "Layout-Aware Extraction"
+    tool: "docling"
+    cost_per_page_usd: 0.00
+    triggers:
+      - layout_complexity: table_heavy
+      - layout_complexity: multi_column
+      - origin_type: mixed
+    confidence_gate: 0.75
+    escalation_trigger: 0.65
+  
+  strategy_c_vision_ocr:
+    name: "Vision-Augmented OCR"
+    tool: "docling + rapidocr"
+    cost_per_page_usd: 0.002
+    triggers:
+      - origin_type: scanned_image
+      - strategy_a_confidence < 0.70
+      - strategy_b_confidence < 0.65
+    confidence_gate: 0.70
+    escalation_trigger: 0.50
+
+# =============================================================================
+# QUALITY GATES
+# =============================================================================
+quality:
+  minimum_score: 0.75
+  excellent_score: 0.95
+  
+  # OCR-specific thresholds
+  ocr:
+    max_digit_error_rate: 0.05
+    max_spacing_error_rate: 0.10
+  
+  # Table-specific thresholds
+  table:
+    min_header_detection: 0.90
+    max_cell_merge_errors: 0.05
+
+# =============================================================================
+# BUDGET GUARDS
+# =============================================================================
+budget:
+  max_cost_per_document_usd: 0.50
+  max_cost_per_batch_usd: 5.00
+  alert_threshold_percent: 80
+
+# =============================================================================
+# DOCUMENT CLASS PROFILES (From 49-File Analysis)
+# =============================================================================
+document_classes:
+  audit_scanned:
+    description: "Scanned financial audit reports (DBE)"
+    files_analyzed: 10
+    format: scanned_image
+    strategy: strategy_c_vision_ocr
+    avg_quality_score: 0.94
+    avg_processing_time_min: 4.5
+  
+  cbe_mixed:
+    description: "Commercial Bank annual reports (mixed format)"
+    files_analyzed: 17
+    format: mixed
+    strategy: strategy_a_fast_text
+    avg_quality_score: 0.99
+    avg_processing_time_min: 1.5
+  
+  fta_mixed:
+    description: "Financial Transparency Assessment reports"
+    files_analyzed: 16
+    format: mixed
+    strategy: strategy_b_layout_aware
+    avg_quality_score: 0.99
+    avg_processing_time_min: 2.0
+  
+  tax_table_heavy:
+    description: "Tax expenditure reports (table-heavy)"
+    files_analyzed: 6
+    format: table_heavy
+    strategy: strategy_a_fast_text
+    avg_quality_score: 1.00
+    avg_processing_time_min: 1.5
+
+# =============================================================================
+# CHUNKING RULES (Constitution)
+# =============================================================================
+chunking:
+  rules:
+    - id: 1
+      name: "table_cell_never_split_from_header"
+      enforcement: "validate_before_emit"
+    
+    - id: 2
+      name: "figure_caption_as_metadata"
+      enforcement: "validate_before_emit"
+    
+    - id: 3
+      name: "numbered_list_single_ldu"
+      max_tokens: 512
+    
+    - id: 4
+      name: "section_header_as_parent_metadata"
+      enforcement: "always"
+    
+    - id: 5
+      name: "cross_reference_resolution"
+      enforcement: "best_effort"
+  
+  vector_store:
+    chunk_size_tokens: 512
+    chunk_overlap_tokens: 50
+    embedding_model: "all-MiniLM-L6-v2"
