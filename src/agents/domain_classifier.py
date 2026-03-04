@@ -89,7 +89,7 @@ class KeywordClassifier(DomainClassifierStrategy):
             confidence = scores[best_domain]
             
             # Only return domain if confidence is above threshold
-            if confidence > 0.1:
+            if confidence > 0.05:
                 logger.debug(f"KeywordClassifier: {best_domain} (confidence: {confidence:.2f})")
                 return best_domain, min(confidence * 2, 1.0)  # Scale up for readability
         
