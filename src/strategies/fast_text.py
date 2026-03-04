@@ -1,6 +1,5 @@
 import pdfplumber
-from src.models.schemas import ExtractedDocument, Table
-
+from src.models.schemas import ExtractedDocument
 class FastTextExtractor:
     def extract(self, pdf_path: str) -> ExtractedDocument:
         full_text = []

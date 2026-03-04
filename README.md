@@ -194,39 +194,93 @@ quality:
 # Project Structure
 ```
 doc-refinery-agent/
+doc-refinery-agent/
 ├── src/
 │   ├── agents/
-│   │   ├── triage.py
-│   │   ├── chunker.py
-│   │   └── query.py
+│   │   ├── triage.py              # Document classification
+│   │   ├── domain_classifier.py   # Pluggable domain detection
+│   │   └── query_agent.py         # Query with provenance
 │   ├── strategies/
-│   │   ├── base.py
-│   │   ├── fast_text.py
-│   │   └── vision_ocr.py
-│   ├── models/
-│   │   └── schemas.py
-│   └── indexer/
-│       └── chroma_indexer.py
-├── research/
-│   ├── density_profiler.py
-│   ├── quality_checker.py
-│   └── benchmark_docling.py
-├── rubric/
-│   └── extraction_rules.yaml
-├── data/
-│   ├── chunk_audit/
-│   ├── chunk_cbe/
-│   ├── chunk_fta/
-│   └── chunk_tax/
-├── .refinery/
-│   ├── extraction_ledger.jsonl
-│   ├── profiles/
-│   └── *.csv
-├── main.py
-├── pyproject.toml
-├── DOMAIN_NOTES.md
-└── README.md
+│   │   ├── base.py                # Base extractor class
+│   │   ├── fast_text.py           # Strategy A
+│   │   ├── layout_aware.py        # Strategy B (Docling)
+│   │   ├── vision_ocr.py          # Strategy C (RapidOCR)
+│   │   └── router.py              # Confidence-gated routing
+│   ├── chunker/
+│   │   ├── semantic_chunker.py    # 5 constitutional rules
+│   │   └── page_index.py          # Hierarchical index
+│   ├── vector_store/
+│   │   └── vector_db.py           # LanceDB integration
+│   └── models/
+│       └── schemas.py             # Pydantic models
+├── tests/
+│   ├── test_triage.py             # Phase 1 tests (14)
+│   └── test_phase2.py             # Phase 2 tests (12)
+├── demo.py                         # Full pipeline demo
+├── main.py                         # Entry point
+└── .refinery/
+    ├── extraction_ledger.jsonl    # Provenance tracking
+    └── profiles/                   # Document profiles
+---
+
+### **Step 3: Commit README Update**
+
+```powershell
+# Add README
+git add README.md
+
+# Commit
+git commit -m "docs: update README with full architecture documentation
+
+- Added 6-step pipeline diagram
+- Documented 5 constitutional rules
+- Documented 3 extraction strategies
+- Added project structure
+- Added pipeline results (49 documents)
+- Added testing instructions"
+
+# Push
+git push origin feature/advanced-extraction-chunking
 ```
+
+### 6-Step Pipeline
+
+| Step | Component | Description |
+|------|-----------|-------------|
+| **1** | Triage Agent | Document classification (origin, layout, domain) |
+| **2** | Extraction Router | Confidence-gated strategy selection (A/B/C) |
+| **3** | Multi-Strategy Extraction | Fast text, Layout-aware, VLM/OCR |
+| **4** | Semantic Chunking | 5 constitutional rules for RAG quality |
+| **5** | PageIndex Builder | Hierarchical document navigation |
+| **6** | Query Agent | Questions with full provenance chain |
+
+### 5 Constitutional Rules (Semantic Chunking)
+
+1. ✅ Table cells never split from headers
+2. ✅ Figure captions stored as metadata
+3. ✅ Numbered lists kept as single LDU
+4. ✅ Section headers as parent metadata
+5. ✅ Cross-references resolved
+
+### 3 Extraction Strategies
+
+| Strategy | Best For | Confidence Threshold |
+|----------|----------|---------------------|
+| **A (Fast Text)** | Native digital, single column | 0.85 |
+| **B (Layout-Aware)** | Table-heavy, multi-column | 0.75 |
+| **C (VLM/OCR)** | Scanned, image-based | 0.70 |
+
+## 🧪 Testing
+
+```bash
+# Phase 1 Tests (14 tests)
+uv run pytest tests/test_triage.py -v
+
+# Phase 2 Tests (12 tests)
+uv run pytest tests/test_phase2.py -v
+
+# Full Pipeline Demo
+uv run python demo.py
 
 # License
 MIT License
