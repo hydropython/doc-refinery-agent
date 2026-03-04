@@ -1,159 +1,95 @@
-# Document Intelligence Refinery - Extraction Rules
-# Based on empirical analysis of 49 documents (2026-03-03)
-# Modify this file to onboard new document types without code changes
-
-version: "1.0"
-created_at: "2026-03-03"
-corpus_analyzed: 49
-
 # =============================================================================
-# TRIAGE THRESHOLDS
+# EXTRACTION RULES & THRESHOLDS
+# Document Intelligence Refinery - Configuration
 # =============================================================================
-triage:
-  # Detect scanned vs. digital PDFs
+
+# -----------------------------------------------------------------------------
+# Strategy Selection Thresholds
+# -----------------------------------------------------------------------------
+strategy_selection:
+  # Strategy A: Fast Text (pdfplumber)
+  strategy_a:
+    min_char_count: 100          # Min characters per page
+    max_image_ratio: 0.50        # Max image area / page area
+    min_char_density: 0.01       # Min chars / page area (points²)
+    requires_font_meta: false    # Font metadata helpful but not required
+    
+  # Strategy B: Layout-Aware (Docling)
+  strategy_b:
+    trigger_multi_column: true   # Use for multi-column layouts
+    trigger_table_heavy: true    # Use when tables detected
+    trigger_mixed_origin: true   # Use for mixed digital/scanned
+    
+  # Strategy C: Vision/OCR (VLM)
+  strategy_c:
+    trigger_scanned: true        # Use for scanned_image origin
+    trigger_low_confidence: true # Use when A/B confidence < threshold
+    trigger_handwriting: true    # Use when handwriting detected
+
+# -----------------------------------------------------------------------------
+# Confidence Thresholds
+# -----------------------------------------------------------------------------
+confidence:
+  strategy_a_threshold: 0.85     # Below this → escalate to B
+  strategy_b_threshold: 0.75     # Below this → escalate to C
+  strategy_c_threshold: 0.70     # Below this → flag for review
+  
+# -----------------------------------------------------------------------------
+# Budget Guards
+# -----------------------------------------------------------------------------
+budget:
+  max_cost_per_document: 0.50    # USD - never exceed this
+  strategy_a_cost_per_page: 0.00 # Free (local extraction)
+  strategy_b_cost_per_page: 0.00 # Free (local Docling)
+  strategy_c_cost_per_page: 0.002 # Paid (VLM API)
+
+# -----------------------------------------------------------------------------
+# Semantic Chunking Rules (The Constitution)
+# -----------------------------------------------------------------------------
+chunking:
+  rule_1: "Table cells never split from headers"
+  rule_2: "Figure captions stored as metadata"
+  rule_3: "Numbered lists kept as single LDU"
+  rule_4: "Section headers as parent metadata"
+  rule_5: "Cross-references resolved"
+  
+  max_chunk_size: 512            # Max tokens per chunk
+  overlap: 50                    # Token overlap between chunks
+
+# -----------------------------------------------------------------------------
+# Document Classification Rules
+# -----------------------------------------------------------------------------
+classification:
   origin_type:
     scanned_image:
-      max_text_chars: 50
-      min_images: 1
+      max_char_density: 0.01
+      min_image_ratio: 0.50
     native_digital:
-      min_text_chars: 1000
-      max_images: 0
+      min_char_density: 0.10
+      max_image_ratio: 0.30
     mixed:
-      min_text_chars: 50
-      max_text_chars: 1000
-  
-  # Detect layout complexity
+      char_density_range: [0.01, 0.10]
+      
   layout_complexity:
-    table_heavy:
-      min_tables: 2
     single_column:
       max_columns: 1
+      max_tables: 2
     multi_column:
       min_columns: 2
+    table_heavy:
+      min_tables: 3
+    figure_heavy:
+      min_figures: 5
 
-# =============================================================================
-# EXTRACTION STRATEGIES
-# =============================================================================
-strategies:
-  strategy_a_fast_text:
-    name: "Fast Text Extraction"
-    tool: "pdfplumber"
-    cost_per_page_usd: 0.00
-    triggers:
-      - origin_type: native_digital
-      - layout_complexity: single_column
-    confidence_gate: 0.85
-    escalation_trigger: 0.70
-  
-  strategy_b_layout_aware:
-    name: "Layout-Aware Extraction"
-    tool: "docling"
-    cost_per_page_usd: 0.00
-    triggers:
-      - layout_complexity: table_heavy
-      - layout_complexity: multi_column
-      - origin_type: mixed
-    confidence_gate: 0.75
-    escalation_trigger: 0.65
-  
-  strategy_c_vision_ocr:
-    name: "Vision-Augmented OCR"
-    tool: "docling + rapidocr"
-    cost_per_page_usd: 0.002
-    triggers:
-      - origin_type: scanned_image
-      - strategy_a_confidence < 0.70
-      - strategy_b_confidence < 0.65
-    confidence_gate: 0.70
-    escalation_trigger: 0.50
-
-# =============================================================================
-# QUALITY GATES
-# =============================================================================
-quality:
-  minimum_score: 0.75
-  excellent_score: 0.95
-  
-  # OCR-specific thresholds
-  ocr:
-    max_digit_error_rate: 0.05
-    max_spacing_error_rate: 0.10
-  
-  # Table-specific thresholds
-  table:
-    min_header_detection: 0.90
-    max_cell_merge_errors: 0.05
-
-# =============================================================================
-# BUDGET GUARDS
-# =============================================================================
-budget:
-  max_cost_per_document_usd: 0.50
-  max_cost_per_batch_usd: 5.00
-  alert_threshold_percent: 80
-
-# =============================================================================
-# DOCUMENT CLASS PROFILES (From 49-File Analysis)
-# =============================================================================
-document_classes:
-  audit_scanned:
-    description: "Scanned financial audit reports (DBE)"
-    files_analyzed: 10
-    format: scanned_image
-    strategy: strategy_c_vision_ocr
-    avg_quality_score: 0.94
-    avg_processing_time_min: 4.5
-  
-  cbe_mixed:
-    description: "Commercial Bank annual reports (mixed format)"
-    files_analyzed: 17
-    format: mixed
-    strategy: strategy_a_fast_text
-    avg_quality_score: 0.99
-    avg_processing_time_min: 1.5
-  
-  fta_mixed:
-    description: "Financial Transparency Assessment reports"
-    files_analyzed: 16
-    format: mixed
-    strategy: strategy_b_layout_aware
-    avg_quality_score: 0.99
-    avg_processing_time_min: 2.0
-  
-  tax_table_heavy:
-    description: "Tax expenditure reports (table-heavy)"
-    files_analyzed: 6
-    format: table_heavy
-    strategy: strategy_a_fast_text
-    avg_quality_score: 1.00
-    avg_processing_time_min: 1.5
-
-# =============================================================================
-# CHUNKING RULES (Constitution)
-# =============================================================================
-chunking:
-  rules:
-    - id: 1
-      name: "table_cell_never_split_from_header"
-      enforcement: "validate_before_emit"
-    
-    - id: 2
-      name: "figure_caption_as_metadata"
-      enforcement: "validate_before_emit"
-    
-    - id: 3
-      name: "numbered_list_single_ldu"
-      max_tokens: 512
-    
-    - id: 4
-      name: "section_header_as_parent_metadata"
-      enforcement: "always"
-    
-    - id: 5
-      name: "cross_reference_resolution"
-      enforcement: "best_effort"
-  
-  vector_store:
-    chunk_size_tokens: 512
-    chunk_overlap_tokens: 50
-    embedding_model: "all-MiniLM-L6-v2"
+# -----------------------------------------------------------------------------
+# Provenance Requirements
+# -----------------------------------------------------------------------------
+provenance:
+  required_fields:
+    - document_name
+    - page_number
+    - bounding_box
+    - content_hash
+  bbox_format: "[x0, y0, x1, y1]"
+  hash_algorithm: "sha256"
+  hash_length: 16                # First 16 chars of hash

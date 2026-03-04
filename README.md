@@ -194,33 +194,34 @@ quality:
 # Project Structure
 ```
 doc-refinery-agent/
-doc-refinery-agent/
 ├── src/
 │   ├── agents/
-│   │   ├── triage.py              # Document classification
-│   │   ├── domain_classifier.py   # Pluggable domain detection
-│   │   └── query_agent.py         # Query with provenance
+│   │   ├── triage.py              ✅ Document classification
+│   │   ├── domain_classifier.py   ✅ Pluggable domain detection
+│   │   └── query_agent.py         ✅ Query with provenance
 │   ├── strategies/
-│   │   ├── base.py                # Base extractor class
-│   │   ├── fast_text.py           # Strategy A
-│   │   ├── layout_aware.py        # Strategy B (Docling)
-│   │   ├── vision_ocr.py          # Strategy C (RapidOCR)
-│   │   └── router.py              # Confidence-gated routing
+│   │   ├── base.py                ✅ Base extractor class
+│   │   ├── fast_text.py           ✅ Strategy A
+│   │   ├── layout_aware.py        ✅ Strategy B (Docling)
+│   │   ├── vision_ocr.py          ✅ Strategy C (RapidOCR)
+│   │   └── router.py              ✅ Confidence-gated routing (A→B→C)
 │   ├── chunker/
-│   │   ├── semantic_chunker.py    # 5 constitutional rules
-│   │   └── page_index.py          # Hierarchical index
+│   │   ├── semantic_chunker.py    ✅ 5 constitutional rules
+│   │   └── page_index.py          ✅ Hierarchical index
 │   ├── vector_store/
-│   │   └── vector_db.py           # LanceDB integration
+│   │   └── vector_db.py           ✅ LanceDB integration
 │   └── models/
-│       └── schemas.py             # Pydantic models
+│       └── schemas.py             ✅ Pydantic models
 ├── tests/
-│   ├── test_triage.py             # Phase 1 tests (14)
-│   └── test_phase2.py             # Phase 2 tests (12)
-├── demo.py                         # Full pipeline demo
-├── main.py                         # Entry point
+│   ├── test_triage.py             ✅ 14 tests
+│   ├── test_phase2.py             ✅ 12 tests
+│   └── test_escalation.py         ✅ 4 tests
+├── demo.py                         ✅ Full pipeline demo
+├── main.py                         ✅ Entry point
+├── README.md                       ✅ Complete documentation
 └── .refinery/
-    ├── extraction_ledger.jsonl    # Provenance tracking
-    └── profiles/                   # Document profiles
+    ├── extraction_ledger.jsonl    ✅ 49 files processed
+    └── profiles/                   ✅ 49 document profiles
 ---
 
 ### **Step 3: Commit README Update**
@@ -281,6 +282,15 @@ uv run pytest tests/test_phase2.py -v
 
 # Full Pipeline Demo
 uv run python demo.py
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│ DOC REFINERY AGENT │
+├─────────────────────────────────────────────────────────────────────────┤
+│ 📥 Input → 🔍 Triage → 🎯 Router → 📥 Extract → ✂️ Chunk → 📑 Index │
+│ ↓ │
+│ ❓ Query ← 🗄️ Vector ← 🔗 Provenance ← 🤖 Query Agent │
+└─────────────────────────────────────────────────────────────────────────┘
+
 
 # License
 MIT License

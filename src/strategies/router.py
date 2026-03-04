@@ -42,23 +42,23 @@ class ExtractionRouter:
         """
         Extract with confidence-gated routing
         
-        Args:
-            pdf_path: Path to PDF file
-            profile: DocumentProfile from triage agent
-            
-        Returns:
-            Tuple of (ExtractedDocument, strategy_used)
+        ESCALATION PATH: A → B → C (never skip)
+        
+        Exception: If origin_type is 'scanned_image', start from B
+        (Strategy A won't work on scanned docs)
         """
         logger.info(f"Routing extraction for {pdf_path}")
         logger.info(f"Profile: {profile.origin_type} | {profile.layout_complexity}")
         
-        # Start with recommended strategy from triage
-        if profile.recommended_strategy == "strategy_a":
-            return self._try_strategy_a(pdf_path, profile)
-        elif profile.recommended_strategy == "strategy_b":
+        # DECISION: Where to start escalation?
+        if profile.origin_type == "scanned_image":
+            # Scanned docs: Start from B (A won't work)
+            logger.info("Scanned document: Starting from Strategy B")
             return self._try_strategy_b(pdf_path, profile)
         else:
-            return self._try_strategy_c(pdf_path, profile)
+            # Digital/mixed docs: Always start from A
+            logger.info("Digital document: Starting from Strategy A")
+            return self._try_strategy_a(pdf_path, profile)
     
     def _try_strategy_a(self, pdf_path: str, profile: DocumentProfile) -> Tuple[ExtractedDocument, str]:
         """Try Strategy A, escalate to B if confidence low"""
