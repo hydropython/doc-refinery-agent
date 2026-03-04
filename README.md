@@ -18,21 +18,6 @@
 
 ---
 
-## Table of Contents
-
-1. [Overview](#overview)
-2. [Key Features](#key-features)
-3. [Pipeline Architecture](#pipeline-architecture)
-4. [Installation](#installation)
-5. [Quick Start](#quick-start)
-6. [Configuration](#configuration)
-7. [Pipeline Results](#pipeline-results)
-8. [Project Structure](#project-structure)
-9. [Testing](#testing)
-10. [Troubleshooting](#troubleshooting)
-
----
-
 ## Overview
 
 The Document Intelligence Refinery is an enterprise-grade document extraction and RAG pipeline designed to process heterogeneous financial documents with multi-strategy extraction, confidence-gated routing, and full provenance tracking.
