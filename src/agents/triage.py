@@ -1,5 +1,10 @@
 """
 Phase 1 Task 2: Complete Triage Agent with Multi-Signal origin_type Detection
+
+EDGE CASES HANDLED:
+- Zero-text documents (form-fillable or pure image)
+- Mixed-mode pages (some text, some images)
+- Form-fillable PDFs (interactive forms)
 """
 
 import pdfplumber
@@ -28,7 +33,8 @@ class TriageAgent:
             "scanned_min_images": 1,
             "digital_max_images": 0,
             "low_char_density": 0.1,  # chars per point²
-            "high_image_ratio": 0.5   # image area / page area
+            "high_image_ratio": 0.5,  # image area / page area
+            "form_fillable_threshold": 10  # Max chars for form-fillable
         }
     
     def analyze(self, pdf_path: str) -> DocumentProfile:
@@ -172,14 +178,43 @@ class TriageAgent:
         """
         Phase 1 Requirement 2: Multi-signal origin_type detection
         
+        EDGE CASES HANDLED:
+        1. Zero-text documents (form-fillable or pure image)
+        2. Mixed-mode pages (some text, some images)
+        3. Form-fillable PDFs (interactive forms)
+        
         Signals used:
         - Character density (chars / page area)
         - Image-to-page area ratio
         - Font metadata presence
         - Raw character count
         
-        Returns: "native_digital", "scanned_image", or "mixed"
+        Returns: "native_digital", "scanned_image", "mixed", or "form_fillable"
         """
+        # ========== EDGE CASE 1: Zero-text documents ==========
+        if signals["text_chars"] == 0:
+            if signals["images_found"] > 0:
+                logger.debug("Edge case: Zero-text with images → scanned_image")
+                return "scanned_image"
+            else:
+                logger.debug("Edge case: Zero-text, no images → form_fillable")
+                return "form_fillable"
+        
+        # ========== EDGE CASE 2: Form-fillable PDFs ==========
+        if signals["text_chars"] < self.thresholds["form_fillable_threshold"]:
+            if signals["images_found"] == 0:
+                logger.debug("Edge case: Very low text, no images → form_fillable")
+                return "form_fillable"
+        
+        # ========== EDGE CASE 3: Mixed-mode pages ==========
+        if (signals["text_chars"] < self.thresholds["digital_min_text_chars"] and 
+            signals["text_chars"] > self.thresholds["scanned_max_text_chars"] and
+            signals["image_area_ratio"] > 0.30):
+            logger.debug("Edge case: Mixed text and images → mixed")
+            return "mixed"
+        
+        # ========== Standard Detection (Multi-Signal Voting) ==========
+        
         # Signal 1: Character count
         low_text = signals["text_chars"] < self.thresholds["scanned_max_text_chars"]
         high_text = signals["text_chars"] > self.thresholds["digital_min_text_chars"]
@@ -227,10 +262,15 @@ class TriageAgent:
         - Figure count
         - Bounding box analysis
         
-        Returns: "single_column", "multi_column", or "table_heavy"
+        Returns: "single_column", "multi_column", "table_heavy", or "figure_heavy"
         """
-        if signals["table_count"] > 2:
+        # Check for figure-heavy documents
+        if signals["figure_count"] > 5:
+            return "figure_heavy"
+        # Check for table-heavy documents
+        elif signals["table_count"] > 2:
             return "table_heavy"
+        # Check for multi-column layouts
         elif signals["column_count"] > 1:
             return "multi_column"
         else:
@@ -244,10 +284,10 @@ class TriageAgent:
         """
         # Simple keyword-based (can be swapped with VLM later)
         keywords = {
-            "financial": ["revenue", "assets", "liabilities", "equity", "balance sheet", "income statement"],
-            "legal": ["contract", "agreement", "clause", "party", "liability", "indemnification"],
-            "technical": ["API", "endpoint", "response", "request", "parameter", "function"],
-            "medical": ["patient", "diagnosis", "treatment", "symptom", "medication"]
+            "financial": ["revenue", "assets", "liabilities", "equity", "balance sheet", "income statement", "fiscal", "tax", "expenditure"],
+            "legal": ["contract", "agreement", "clause", "party", "liability", "indemnification", "arbitration", "plaintiff"],
+            "technical": ["API", "endpoint", "response", "request", "parameter", "function", "module", "interface"],
+            "medical": ["patient", "diagnosis", "treatment", "symptom", "medication", "prescription", "clinical"]
         }
         
         # In real implementation, extract text sample for keyword matching
@@ -294,10 +334,13 @@ class TriageAgent:
         
         Returns: "strategy_a", "strategy_b", or "strategy_c"
         """
-        if origin_type == "scanned_image":
+        # Form-fillable or scanned → Strategy C (OCR/VLM)
+        if origin_type in ["scanned_image", "form_fillable"]:
             return "strategy_c"
-        elif layout_complexity == "table_heavy":
+        # Table-heavy or multi-column → Strategy B (Layout-Aware)
+        elif layout_complexity in ["table_heavy", "multi_column", "figure_heavy"]:
             return "strategy_b"
+        # Simple digital → Strategy A (Fast Text)
         else:
             return "strategy_a"
     
