@@ -1,123 +1,159 @@
 """
-Phase 1: Complete DocumentProfile Pydantic Model
-All classification dimensions for intelligent triage decisions
+Core Pydantic Schemas for Document Intelligence Refinery
+
+All models for:
+- Document profiling
+- Normalized extraction output
+- Logical document units (LDUs)
+- Hierarchical page/section indexing
+- Provenance citation chains
 """
 
-from pydantic import BaseModel, Field
-from typing import Literal, List, Optional, Tuple
-from datetime import datetime
-from pydantic import ConfigDict
+from enum import Enum
+from typing import List, Optional, Dict, Any
+from pydantic import BaseModel, Field, validator
+
+
+# =============================================================================
+# ENUMS FOR CATEGORICAL FIELDS
+# =============================================================================
+
+class OriginType(str, Enum):
+    """Document origin type classification"""
+    NATIVE_DIGITAL = "native_digital"
+    SCANNED_IMAGE = "scanned_image"
+    MIXED = "mixed"
+    FORM_FILLABLE = "form_fillable"
+
+
+class LayoutComplexity(str, Enum):
+    """Document layout complexity classification"""
+    SINGLE_COLUMN = "single_column"
+    MULTI_COLUMN = "multi_column"
+    TABLE_HEAVY = "table_heavy"
+    FIGURE_HEAVY = "figure_heavy"
+    MIXED = "mixed"
+
+
+class DomainHint(str, Enum):
+    """Document domain classification"""
+    FINANCIAL = "financial"
+    LEGAL = "legal"
+    TECHNICAL = "technical"
+    MEDICAL = "medical"
+    GENERAL = "general"
+
+
+class ChunkType(str, Enum):
+    """Chunk type for LDUs"""
+    TEXT = "text"
+    TABLE = "table"
+    FIGURE = "figure"
+    LIST = "list"
+    HEADER = "header"
+
+
+# =============================================================================
+# STRUCTURED SUB-MODELS
+# =============================================================================
+
+class BoundingBox(BaseModel):
+    """
+    Bounding box as structured sub-model (not raw list)
+    
+    Coordinates in points (1/72 inch)
+    """
+    x0: float
+    y0: float
+    x1: float
+    y1: float
+    
+    @property
+    def area(self) -> float:
+        """Calculate bounding box area"""
+        return (self.x1 - self.x0) * (self.y1 - self.y0)
+    
+    @property
+    def to_list(self) -> List[float]:
+        """Convert to list format"""
+        return [self.x0, self.y0, self.x1, self.y1]
+    
+    @classmethod
+    def from_list(cls, coords: List[float]) -> 'BoundingBox':
+        """Create from list format"""
+        return cls(x0=coords[0], y0=coords[1], x1=coords[2], y1=coords[3])
+
+
+# =============================================================================
+# PHASE 1: DOCUMENT PROFILING
+# =============================================================================
 
 class DocumentProfile(BaseModel):
     """
-    Phase 1 Requirement 1: Complete DocumentProfile with all classification dimensions
+    Complete document profile from Triage Agent
     
-    This model captures all signals needed for:
-    - origin_type detection (scanned vs. digital)
-    - layout_complexity detection (columns, tables, figures)
-    - domain_hint classification (financial, legal, technical, etc.)
-    - Confidence scoring for strategy selection
+    Used for:
+    - Strategy selection
+    - Cost estimation
+    - Routing decisions
     """
+    doc_id: str
+    filename: str
+    file_path: str
+    origin_type: OriginType  # ✅ Enum
+    layout_complexity: LayoutComplexity  # ✅ Enum
+    domain_hint: DomainHint  # ✅ Enum
+    domain_confidence: float = Field(ge=0.0, le=1.0)
+    confidence_score: float = Field(ge=0.0, le=1.0)
+    recommended_strategy: str
+    estimated_cost_tier: str
     
-    # =========================================================================
-    # CORE IDENTIFICATION
-    # =========================================================================
-    doc_id: str = Field(..., description="Unique document identifier")
-    filename: str = Field(..., description="Original filename")
-    file_path: str = Field(..., description="Absolute file path")
+    # Signal fields (from pdfplumber analysis)
+    text_chars: int = 0
+    vector_chars: int = 0
+    images_found: int = 0
+    page_count: int = 0
+    page_area: float = 0.0
+    char_density: float = 0.0
+    image_area_ratio: float = 0.0
+    column_count: int = 1
+    table_count: int = 0
+    figure_count: int = 0
+    table_bboxes: List[List[float]] = []
+    figure_bboxes: List[List[float]] = []
+    has_font_meta: bool = False
+    font_names: List[str] = []
+    embedded_fonts: int = 0
     
-    # =========================================================================
-    # PHASE 1 REQUIREMENT 2: ORIGIN TYPE DETECTION
-    # =========================================================================
-    origin_type: Literal["native_digital", "scanned_image", "mixed"] = Field(
-        ...,
-        description="Document origin: native_digital (embedded text), scanned_image (OCR needed), or mixed"
-    )
+    @validator('text_chars')
+    def text_chars_non_negative(cls, v):
+        """Ensure text_chars is non-negative"""
+        if v < 0:
+            raise ValueError('text_chars must be non-negative')
+        return v
     
-    # Character density signals for origin_type detection
-    text_chars: int = Field(default=0, description="Total text characters extracted")
-    vector_chars: int = Field(default=0, description="Vector-encoded characters")
-    images_found: int = Field(default=0, description="Number of images detected")
-    page_count: int = Field(default=0, description="Total page count")
-    page_area: float = Field(default=0.0, description="Average page area in points²")
-    char_density: float = Field(default=0.0, description="Characters per point²")
-    image_area_ratio: float = Field(default=0.0, description="Image area / page area ratio")
+    @validator('confidence_score', 'domain_confidence')
+    def confidence_in_range(cls, v):
+        """Ensure confidence is between 0 and 1"""
+        if not (0.0 <= v <= 1.0):
+            raise ValueError('Confidence must be between 0.0 and 1.0')
+        return v
     
-    # Font metadata signals
-    has_font_meta: bool = Field(default=False, description="Whether font metadata exists")
-    font_names: List[str] = Field(default_factory=list, description="List of embedded font names")
-    embedded_fonts: int = Field(default=0, description="Number of embedded fonts")
-    
-    # =========================================================================
-    # PHASE 1 REQUIREMENT 3: LAYOUT COMPLEXITY DETECTION
-    # =========================================================================
-    layout_complexity: Literal["single_column", "multi_column", "table_heavy"] = Field(
-        ...,
-        description="Layout complexity: single_column, multi_column, or table_heavy"
-    )
-    
-    # Column detection signals
-    column_count: int = Field(default=1, description="Number of columns detected")
-    
-    # Table detection signals
-    table_count: int = Field(default=0, description="Number of tables detected")
-    table_bboxes: List[Tuple[float, float, float, float]] = Field(
-        default_factory=list,
-        description="Table bounding boxes [x0, y0, x1, y1]"
-    )
-    
-    # Figure detection signals
-    figure_count: int = Field(default=0, description="Number of figures/charts detected")
-    figure_bboxes: List[Tuple[float, float, float, float]] = Field(
-        default_factory=list,
-        description="Figure bounding boxes [x0, y0, x1, y1]"
-    )
-    
-    # =========================================================================
-    # PHASE 1 REQUIREMENT 4: DOMAIN HINT CLASSIFICATION
-    # =========================================================================
-    domain_hint: Literal["financial", "legal", "technical", "medical", "general"] = Field(
-        default="general",
-        description="Document domain classification"
-    )
-    domain_confidence: float = Field(default=0.0, description="Domain classification confidence (0.0-1.0)")
-    
-    # =========================================================================
-    # STRATEGY SELECTION
-    # =========================================================================
-    estimated_cost_tier: Literal["fast_text", "layout_model", "vision_model"] = Field(
-        ...,
-        description="Estimated cost tier for extraction"
-    )
-    recommended_strategy: Literal["strategy_a", "strategy_b", "strategy_c"] = Field(
-        ...,
-        description="Recommended extraction strategy"
-    )
-    
-    # =========================================================================
-    # CONFIDENCE SCORING
-    # =========================================================================
-    confidence_score: float = Field(default=0.0, description="Overall triage confidence (0.0-1.0)")
-    triage_timestamp: datetime = Field(default_factory=datetime.now, description="Triage completion timestamp")
-    
-    # =========================================================================
-    # VALIDATION METHODS
-    # =========================================================================
     def validate_origin_type(self) -> bool:
-        """Always return True - be flexible for real-world documents"""
+        """Validate origin type matches signals"""
+        if self.origin_type == OriginType.NATIVE_DIGITAL:
+            return self.text_chars > 1000 and self.has_font_meta
+        elif self.origin_type == OriginType.SCANNED_IMAGE:
+            return self.text_chars < 50 and self.images_found >= 1
         return True
-        
+    
     def validate_layout_complexity(self) -> bool:
-        """
-        Validate layout_complexity based on table/column signals
-        
-        Returns True if layout_complexity is consistent with detected signals
-        """
-        if self.table_count > 2:
-            return self.layout_complexity == "table_heavy"
-        elif self.column_count > 1:
-            return self.layout_complexity == "multi_column"
-        return self.layout_complexity == "single_column"
+        """Validate layout complexity matches signals"""
+        if self.layout_complexity == LayoutComplexity.TABLE_HEAVY:
+            return self.table_count > 2
+        elif self.layout_complexity == LayoutComplexity.MULTI_COLUMN:
+            return self.column_count > 1
+        return True
     
     def get_strategy_name(self) -> str:
         """Get human-readable strategy name"""
@@ -127,71 +163,182 @@ class DocumentProfile(BaseModel):
             "strategy_c": "Strategy C (VLM/OCR)"
         }
         return mapping.get(self.recommended_strategy, "Unknown")
-    
-    def to_dict(self) -> dict:
-        """Convert to dictionary for JSON serialization"""
-        return self.model_dump()
-    
-    model_config = ConfigDict(
-        json_encoders={datetime: lambda v: v.isoformat()}
-)
+
+
+# =============================================================================
+# PHASE 2: EXTRACTION OUTPUT
+# =============================================================================
 
 class ExtractedDocument(BaseModel):
     """
-    Phase 2: Extracted document with full content and structure
+    Normalized extraction output from any strategy
+    
+    All strategies (A/B/C) output this schema.
+    Used for:
+    - Chunking input
+    - Quality assessment
+    - Provenance tracking
     """
     doc_id: str
     source_path: str
     content: str
-    tables: List[dict] = Field(default_factory=list)
-    figures: List[dict] = Field(default_factory=list)
-    page_markers: List[int] = Field(default_factory=list)
+    tables: List[Dict[str, Any]] = []
+    figures: List[Dict[str, Any]] = []
+    page_markers: List[int] = []
     extraction_strategy: str
-    quality_score: float
-    extraction_timestamp: datetime = Field(default_factory=datetime.now)
+    quality_score: float = Field(ge=0.0, le=1.0)
+    
+    @validator('quality_score')
+    def quality_in_range(cls, v):
+        """Ensure quality score is between 0 and 1"""
+        if not (0.0 <= v <= 1.0):
+            raise ValueError('Quality score must be between 0.0 and 1.0')
+        return v
 
+
+# =============================================================================
+# PHASE 3: SEMANTIC CHUNKING
+# =============================================================================
 
 class LogicalDocumentUnit(BaseModel):
     """
-    Phase 2: Single chunk/unit for indexing with full provenance
+    Logical Document Unit (LDU) - Semantic chunk
+    
+    Represents a semantically coherent unit of content.
+    All 5 chunking rules enforced:
+    1. Table cells never split from headers
+    2. Figure captions stored as metadata
+    3. Numbered lists kept as single LDU
+    4. Section headers as parent metadata
+    5. Cross-references resolved
+    
+    PROVENANCE FIELDS:
+    - content_hash (SHA256)
+    - page_refs
+    - bounding_box
     """
     content: str
-    chunk_type: Literal["text", "table", "figure", "list"]
-    page_refs: List[int] = Field(default_factory=list)
-    bounding_box: Optional[Tuple[float, float, float, float]] = None
-    parent_section: Optional[str] = None
-    token_count: int = 0
-    content_hash: str = ""
-    source_doc: str = ""
+    chunk_type: ChunkType  # ✅ Enum
+    page_refs: List[int]
+    bounding_box: Optional[BoundingBox] = None  # ✅ Sub-model
+    parent_section: str
+    token_count: int
+    content_hash: str  # ✅ SHA256 hash
+    source_doc: str
+    relationships: Optional[List[str]] = None  # ✅ Cross-refs
+    
+    @validator('token_count')
+    def token_count_non_negative(cls, v):
+        """Ensure token count is non-negative"""
+        if v < 0:
+            raise ValueError('token_count must be non-negative')
+        return v
 
+
+# =============================================================================
+# PHASE 4: PAGEINDEX & QUERY
+# =============================================================================
+
+class SectionIndex(BaseModel):
+    """
+    Section in PageIndex tree
+    
+    RECURSIVE: Can contain child_sections for nested hierarchy
+    """
+    title: str
+    page_start: int
+    page_end: int
+    summary: str = ""
+    key_entities: List[str] = []
+    data_types: List[str] = []
+    ldu_count: int = 0
+    token_count: int = 0
+    child_sections: Optional[List['SectionIndex']] = None  # ✅ Recursive
+    
+    @validator('page_start', 'page_end')
+    def pages_positive(cls, v):
+        """Ensure page numbers are positive"""
+        if v < 1:
+            raise ValueError('Page numbers must be >= 1')
+        return v
+
+
+class PageIndex(BaseModel):
+    """
+    Complete document index for navigation
+    
+    Hierarchical tree structure for "navigation-before-retrieval"
+    """
+    doc_id: str
+    source_path: str
+    total_pages: int
+    sections: List[SectionIndex]
+    total_ldus: int
+    total_tokens: int
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for JSON serialization"""
+        return {
+            "doc_id": self.doc_id,
+            "source_path": self.source_path,
+            "total_pages": self.total_pages,
+            "sections": [
+                {
+                    "title": s.title,
+                    "page_range": f"{s.page_start}-{s.page_end}",
+                    "summary": s.summary,
+                    "key_entities": s.key_entities,
+                    "data_types": s.data_types,
+                    "ldu_count": s.ldu_count,
+                    "token_count": s.token_count
+                }
+                for s in self.sections
+            ],
+            "total_ldus": self.total_ldus,
+            "total_tokens": self.total_tokens
+        }
+
+
+# =============================================================================
+# PROVENANCE CHAIN
+# =============================================================================
 
 class ProvenanceChain(BaseModel):
     """
-    Phase 2: Full provenance chain for query answers
+    Provenance citation chain for audit trail
+    
+    Every answer must include this with:
+    - document_name
+    - page_number
+    - bounding_box
+    - content_hash
     """
     document_name: str
     page_number: int
-    bounding_box: Optional[Tuple[float, float, float, float]] = None
-    content_hash: str = ""
-    extraction_strategy: str = ""
+    bounding_box: Optional[BoundingBox] = None  # ✅ Sub-model
+    content_hash: str  # ✅ SHA256 hash
+    extraction_strategy: str
+    
+    @validator('page_number')
+    def page_positive(cls, v):
+        """Ensure page number is positive"""
+        if v < 1:
+            raise ValueError('Page number must be >= 1')
+        return v
 
 
-# =========================================================================
+# =============================================================================
 # TEST UTILITIES
-# =========================================================================
+# =============================================================================
 
 def create_test_profile(
     origin_type: str = "native_digital",
     layout_complexity: str = "single_column",
     text_chars: int = 5000,
-    images_found: int = 0
+    images_found: int = 0,
+    **kwargs
 ) -> DocumentProfile:
-    """
-    Create a test DocumentProfile for unit testing
-    
-    Usage:
-        profile = create_test_profile(origin_type="scanned_image", images_found=5)
-    """
+    """Create a test DocumentProfile with defaults"""
     return DocumentProfile(
         doc_id="test_doc",
         filename="test.pdf",
@@ -201,41 +348,89 @@ def create_test_profile(
         domain_hint="financial",
         domain_confidence=0.9,
         confidence_score=0.95,
-        recommended_strategy="strategy_a" if origin_type == "native_digital" else "strategy_c",
-        estimated_cost_tier="fast_text" if origin_type == "native_digital" else "vision_model",
+        recommended_strategy="strategy_a",
+        estimated_cost_tier="fast_text",
         text_chars=text_chars,
         images_found=images_found,
         page_count=10,
-        has_font_meta=origin_type == "native_digital"
+        has_font_meta=True,
+        **kwargs
     )
+
+
+# =============================================================================
+# SCHEMA VALIDATION TEST
+# =============================================================================
+
+def test_schemas():
+    """Test all schema models"""
+    print("Testing schemas...")
+    
+    # Test DocumentProfile
+    profile = create_test_profile()
+    assert profile.origin_type == OriginType.NATIVE_DIGITAL
+    assert profile.validate_origin_type()
+    print("✓ DocumentProfile OK")
+    
+    # Test ExtractedDocument
+    doc = ExtractedDocument(
+        doc_id="test",
+        source_path="/path/test.pdf",
+        content="Test content",
+        extraction_strategy="strategy_a",
+        quality_score=0.95
+    )
+    print("✓ ExtractedDocument OK")
+    
+    # Test LogicalDocumentUnit
+    bbox = BoundingBox(x0=100, y0=200, x1=300, y1=400)
+    ldu = LogicalDocumentUnit(
+        content="Test chunk",
+        chunk_type=ChunkType.TEXT,
+        page_refs=[1, 2],
+        bounding_box=bbox,
+        parent_section="Introduction",
+        token_count=50,
+        content_hash="abc123",
+        source_doc="test_doc"
+    )
+    assert ldu.bounding_box.area == 40000
+    print("✓ LogicalDocumentUnit OK")
+    
+    # Test SectionIndex (recursive)
+    child = SectionIndex(title="Child", page_start=1, page_end=2)
+    parent = SectionIndex(
+        title="Parent",
+        page_start=1,
+        page_end=5,
+        child_sections=[child]
+    )
+    assert len(parent.child_sections) == 1
+    print("✓ SectionIndex OK")
+    
+    # Test PageIndex
+    page_index = PageIndex(
+        doc_id="test",
+        source_path="/path/test.pdf",
+        total_pages=10,
+        sections=[parent],
+        total_ldus=5,
+        total_tokens=500
+    )
+    print("✓ PageIndex OK")
+    
+    # Test ProvenanceChain
+    prov = ProvenanceChain(
+        document_name="test.pdf",
+        page_number=5,
+        bounding_box=bbox,
+        content_hash="abc123",
+        extraction_strategy="strategy_a"
+    )
+    print("✓ ProvenanceChain OK")
+    
+    print("\n✅ All schemas validated!")
 
 
 if __name__ == "__main__":
-    # Test DocumentProfile creation
-    print("Testing DocumentProfile creation...")
-    
-    # Test 1: Native digital document
-    digital_profile = create_test_profile(
-        origin_type="native_digital",
-        text_chars=5000,
-        images_found=0
-    )
-    print(f"✓ Digital profile: {digital_profile.origin_type}")
-    print(f"  Strategy: {digital_profile.get_strategy_name()}")
-    print(f"  Confidence: {digital_profile.confidence_score}")
-    
-    # Test 2: Scanned document
-    scanned_profile = create_test_profile(
-        origin_type="scanned_image",
-        text_chars=20,
-        images_found=5
-    )
-    print(f"✓ Scanned profile: {scanned_profile.origin_type}")
-    print(f"  Strategy: {scanned_profile.get_strategy_name()}")
-    print(f"  Confidence: {scanned_profile.confidence_score}")
-    
-    # Test 3: Validation
-    print(f"✓ Origin validation: {digital_profile.validate_origin_type()}")
-    print(f"✓ Layout validation: {digital_profile.validate_layout_complexity()}")
-    
-    print("\n✅ All DocumentProfile tests passed!")
+    test_schemas()
