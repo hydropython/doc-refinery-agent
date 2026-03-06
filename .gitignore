@@ -1,3 +1,4 @@
+# Make sure .env and data/ are excluded
 @'
 # Python
 __pycache__/
@@ -23,7 +24,12 @@ ENV/
 *.log
 *.tmp
 *.temp
-image.png
+*.png
+
+# Secrets and large files
+.env
+data/
+output/
 
 # Test/Debug files
 test_*.py
@@ -34,20 +40,9 @@ check_*.py
 *.bak2
 *.bak3
 *_new.py
-
-# Build/output
-output/
-processors/
-scripts/
-examples/
-src/utils/
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Dependencies (if using uv)
-# uv.lock - actually KEEP this for reproducibility
 '@ | Out-File -FilePath ".gitignore" -Encoding UTF8
+
+# Add updated .gitignore
+git add .gitignore
 
 Write-Host "✅ .gitignore updated!" -ForegroundColor Green

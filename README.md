@@ -5,45 +5,58 @@
 [![Status](https://img.shields.io/badge/Status-Phase_0_Complete-Blue?style=for-the-badge)](https://github.com/hydropython/doc-refinery-agent)
 [![Pipeline](https://img.shields.io/badge/Pipeline-49/49_Success-BrightGreen?style=for-the-badge)](https://github.com/hydropython/doc-refinery-agent)
 
-**Enterprise-Grade Document Extraction & RAG Pipeline**
-
-| Metric | Value |
-|--------|-------|
-| Version | 1.0.0 |
-| Execution Date | 2026-03-03 |
-| Corpus | 49 files (AUDIT, CBE, FTA, TAX) |
-| Success Rate | 100% (49/49) |
-| Avg Quality Score | 0.98 |
-| Total Cost | $0.20 |
-
 ---
-
 ## Overview
 
 The Document Intelligence Refinery is an enterprise-grade document extraction and RAG pipeline designed to process heterogeneous financial documents with multi-strategy extraction, confidence-gated routing, and full provenance tracking.
 
-### Key Capabilities
+## 📌 Overview
 
-- **Multi-strategy extraction** (Fast Text, Layout-Aware, VLM/OCR)
-- **Confidence-gated routing** with automatic escalation
-- **Full provenance tracking** (page refs, bounding boxes, content hashes)
-- **Quality gate enforcement** (minimum 0.75 quality score)
-- **Vector store indexing** for semantic search
-- **Cost-optimized processing** (68% savings vs. all-OCR)
+A production-ready document intelligence pipeline that extracts text, tables, and chart data from PDFs (both digital and scanned), creates searchable knowledge units with provenance tracking, and answers natural language queries - **100% locally** with **zero cloud dependencies**.
 
-### Use Cases
 
-- Financial statement extraction (balance sheets, income statements)
-- Audit report processing
-- Regulatory document analysis
-- Enterprise document intelligence
-- RAG-powered query systems
+
+
 
 ---
 
-## Key Features
+## ✨ Key Features
 
+| Feature | Description |
+|---------|-------------|
+| 🔒 **100% Local** | No API calls, no cloud dependencies, no data leaves your machine |
+| 💰 **$0.00 Cost** | Free and open source - no per-page charges |
+| 📊 **Chart Extraction** | OCR captures percentages, labels, and values from charts/graphs |
+| 📍 **Provenance Tracking** | Every answer includes page number + bounding box location |
+| 💬 **Natural Language Query** | Ask questions in plain English, get answers with sources |
+| 📈 **Precision/Recall Metrics** | Built-in evaluation module for quality assessment |
+
+---
+
+## 🚀 Quick Start
+
+### Prerequisites
+
+- Python 3.11 or higher
+- [uv](https://github.com/astral-sh/uv) (recommended) or pip
+
+### Installation
+
+```bash
+# Clone repository
+git clone https://github.com/hydropython/doc-refinery-agent.git
+cd doc-refinery-agent
+
+# Checkout feature branch
+git checkout feature/advanced-extraction-chunking
+
+# Install dependencies with uv (recommended)
+uv sync
+
+# Or with pip
+pip install -e .
 ### Multi-Strategy Extraction
+```
 
 | Strategy | Tool | Cost/Page | Use Case | Trigger |
 |----------|------|-----------|----------|---------|
@@ -71,16 +84,63 @@ Every extracted chunk includes:
 ## Pipeline Architecture
 
 ### 5-Stage Pipeline
-Stage 1: Triage Agent (Document Classifier)
-↓
-Stage 2: Structure Extraction (Multi-Strategy Router)
-↓
-Stage 3: Semantic Chunking
-↓
-Stage 4: PageIndex Builder
-↓
-Stage 5: Vector Store + Query Agent
-
+┌─────────────────────────────────────────────────────────────────┐
+│                    DOCUMENT REFINERY PIPELINE                   │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  📄 PDF Document                                                │
+│      ↓                                                          │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │ STAGE 0: Document Analysis                              │   │
+│  │ - PyMuPDF page inspection                               │   │
+│  │ - Text density, image count, table detection            │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│      ↓                                                          │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │ STAGE 1: Triage Agent                                   │   │
+│  │ - Classifies: digital, scanned, mixed                   │   │
+│  │ - Routes to appropriate extraction strategy             │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│      ↓                                                          │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │ STAGE 2: Extraction                                     │   │
+│  │ - Strategy A: pdfplumber (digital PDFs)                 │   │
+│  │ - Strategy B: RapidOCR (scanned PDFs)                   │   │
+│  │ - Strategy C: Vision OCR (complex layouts)              │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│      ↓                                                          │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │ STAGE 3: Semantic Chunking                              │   │
+│  │ - Creates Logical Document Units (LDUs)                 │   │
+│  │ - Preserves bounding box provenance                     │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│      ↓                                                          │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │ STAGE 4: PageIndex                                      │   │
+│  │ - Section detection and indexing                        │   │
+│  │ - Key entity extraction                                 │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│      ↓                                                          │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │ STAGE 5: Vector Store                                   │   │
+│  │ - LanceDB local database                                │   │
+│  │ - Semantic embeddings for search                        │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│      ↓                                                          │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │ STAGE 6: Query Interface                                │   │
+│  │ - Natural language questions                            │   │
+│  │ - Returns answers with provenance                       │   │
+│  │ - Confidence scoring (0-1 range)                        │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│      ↓                                                          │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │ STAGE 7: Evaluation                                     │   │
+│  │ - Precision/Recall metrics                              │   │
+│  │ - Per-content-type breakdown                            │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
 
 ### Stage Details
 
@@ -143,24 +203,14 @@ OCR models download automatically on first run.
 
 ## Process All Documents
 ```bash
-uv run main.py
-# Select: A (Process ALL silos)
-```
-## Process Single Institution
-```bash
-uv run main.py
-# Select: 0 (AUDIT), 1 (CBE), 2 (FTA), or 3 (TAX)
-```
-## View Results
-```bash
-# View processing summary
-type .refinery\processing_summary.csv
+## process for specfic page 
+uv run python run_refinery.py --doc <doc_id> --page <page_number>
 
-# View extraction ledger
-type .refinery\extraction_ledger.jsonl
+# Example: Process chart page (Figure 3)
+uv run python run_refinery.py --doc 3 --page 34
 
-# View document profiles
-dir .refinery\profiles\*.json
+# Example: Process table page
+uv run python run_refinery.py --doc 3 --page 27
 ```
 
 # Configuration
@@ -196,32 +246,28 @@ quality:
 doc-refinery-agent/
 ├── src/
 │   ├── agents/
-│   │   ├── triage.py              ✅ Document classification
-│   │   ├── domain_classifier.py   ✅ Pluggable domain detection
-│   │   └── query_agent.py         ✅ Query with provenance
-│   ├── strategies/
-│   │   ├── base.py                ✅ Base extractor class
-│   │   ├── fast_text.py           ✅ Strategy A
-│   │   ├── layout_aware.py        ✅ Strategy B (Docling)
-│   │   ├── vision_ocr.py          ✅ Strategy C (RapidOCR)
-│   │   └── router.py              ✅ Confidence-gated routing (A→B→C)
+│   │   ├── query_agent.py      # Natural language query
+│   │   ├── triage.py           # Document classification
+│   │   └── fact_table.py       # Structured data handling
 │   ├── chunker/
-│   │   ├── semantic_chunker.py    ✅ 5 constitutional rules
-│   │   └── page_index.py          ✅ Hierarchical index
+│   │   ├── semantic_chunker.py # LDU creation with BBox
+│   │   └── page_index.py       # Section indexing
+│   ├── strategies/
+│   │   ├── router.py           # Strategy selection
+│   │   ├── layout_aware.py     # OCR extraction
+│   │   └── vision_ocr.py       # Advanced OCR
+│   ├── models/
+│   │   └── schemas.py          # Data models
 │   ├── vector_store/
-│   │   └── vector_db.py           ✅ LanceDB integration
-│   └── models/
-│       └── schemas.py             ✅ Pydantic models
-├── tests/
-│   ├── test_triage.py             ✅ 14 tests
-│   ├── test_phase2.py             ✅ 12 tests
-│   └── test_escalation.py         ✅ 4 tests
-├── demo.py                         ✅ Full pipeline demo
-├── main.py                         ✅ Entry point
-├── README.md                       ✅ Complete documentation
-└── .refinery/
-    ├── extraction_ledger.jsonl    ✅ 49 files processed
-    └── profiles/                   ✅ 49 document profiles
+│   │   └── vector_db.py        # LanceDB integration
+│   └── evaluation/
+│       └── metrics.py          # Precision/Recall
+├── run_refinery.py             # Main entry point
+├── demo.py                     # Demo script
+├── pyproject.toml              # Dependencies
+├── uv.lock                     # Locked versions
+├── README.md                   # This file
+└── .gitignore                  # Git ignore rules                 ✅ 49 document profiles
 ---
 
 ### **Step 3: Commit README Update**
