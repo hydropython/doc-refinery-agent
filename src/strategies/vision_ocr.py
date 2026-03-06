@@ -1,18 +1,26 @@
 """
-Phase 2 Task 1: Strategy C - VLM/OCR Extraction
+Strategy C: Vision-Augmented Extraction with GPT-4o mini
 
-Uses Docling + RapidOCR for scanned documents.
-Handles image-based PDFs with OCR.
+Uses GPT-4o mini Vision API for OCR and layout understanding.
+Every extracted fact includes spatial provenance (bbox + page).
 
-BUDGET GUARD: Tracks token spend and enforces configurable budget cap.
+BUDGET GUARD: Tracks API spend and enforces configurable budget cap.
 """
 
+import base64
+import requests
+import os
+import json
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from loguru import logger
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 from src.strategies.base import BaseExtractor
-from src.models.schemas import ExtractedDocument, LogicalDocumentUnit
+from src.models.schemas import ExtractedDocument, BoundingBox
 
 
 class BudgetExceededError(Exception):
@@ -22,18 +30,24 @@ class BudgetExceededError(Exception):
 
 class VisionOCRExtractor(BaseExtractor):
     """
-    Strategy C: VLM/OCR Extraction
+    Strategy C: GPT-4o mini Vision Extraction
     
     Best for:
     - Scanned documents
     - Image-based PDFs
-    - Low text density documents
-    - Form-fillable PDFs
+    - Complex layouts (tables, multi-column)
+    - Handwriting recognition
+    - Poor quality scans
     
     BUDGET GUARD:
-    - Tracks running cost per document
+    - Tracks API spend per document
     - Enforces configurable budget cap
     - Raises BudgetExceededError if cap exceeded
+    
+    SPATIAL PROVENANCE:
+    - Every extracted fact includes bounding box
+    - Page numbers tracked per element
+    - Content hash for audit trail
     """
     
     def __init__(self, budget_cap_usd: float = 0.50):
@@ -44,243 +58,262 @@ class VisionOCRExtractor(BaseExtractor):
         )
         self.budget_cap_usd = budget_cap_usd
         self.running_cost = 0.0
-        self.ocr = None
-        self.docling = None
-        logger.info(f"VisionOCRExtractor initialized (budget cap: ${budget_cap_usd})")
-    
-    def _initialize(self):
-        """Lazy-load OCR and Docling"""
-        if self.ocr is None:
-            try:
-                from rapidocr_onnxruntime import RapidOCR
-                self.ocr = RapidOCR()
-                logger.info("RapidOCR initialized successfully")
-            except ImportError:
-                logger.warning("RapidOCR not installed. Using Docling fallback.")
-                self.ocr = None
         
-        if self.docling is None:
-            try:
-                from docling.document_converter import DocumentConverter
-                self.docling = DocumentConverter()
-                logger.info("Docling initialized successfully")
-            except ImportError:
-                logger.error("Docling not installed. Strategy C cannot function.")
-                raise RuntimeError("Docling required for Strategy C")
+        # Load API key from .env
+        self.api_key = os.getenv("OPENAI_API_KEY")
+        self.model_name = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+        
+        if not self.api_key:
+            logger.error("OPENAI_API_KEY not found in .env file!")
+            raise RuntimeError("OPENAI_API_KEY required in .env file")
+        
+        # OpenAI API endpoint
+        self.api_endpoint = "https://api.openai.com/v1/chat/completions"
+        
+        logger.info(f"VisionOCRExtractor initialized (model: {self.model_name}, budget: ${budget_cap_usd})")
+    
+    def _encode_image(self, image_path: str) -> str:
+        """Encode image to base64 for API"""
+        with open(image_path, "rb") as f:
+            return base64.b64encode(f.read()).decode("utf-8")
     
     def _check_budget(self, page_count: int) -> bool:
-        """
-        Check if extraction would exceed budget
-        
-        Args:
-            page_count: Number of pages to extract
-            
-        Returns:
-            True if within budget, False if exceeded
-        """
+        """Check if extraction would exceed budget"""
         estimated_cost = page_count * self.cost_per_page
         total_projected = self.running_cost + estimated_cost
         
         if total_projected > self.budget_cap_usd:
             logger.warning(
-                f"Budget exceeded: ${total_projected:.2f} > ${self.budget_cap_usd} "
-                f"(running: ${self.running_cost:.2f}, estimated: ${estimated_cost:.2f})"
+                f"Budget exceeded: ${total_projected:.2f} > ${self.budget_cap_usd}"
             )
             return False
         
         return True
     
-    def _update_running_cost(self, page_count: int):
-        """Update running cost after extraction"""
-        cost = page_count * self.cost_per_page
+    def _update_running_cost(self, tokens_used: int):
+        """Update running cost after API call"""
+        # GPT-4o mini pricing: $0.15/1M input tokens, $0.60/1M output tokens
+        cost = (tokens_used / 1_000_000) * 0.15
         self.running_cost += cost
-        logger.debug(f"Updated running cost: ${self.running_cost:.2f}")
+        logger.debug(f"Updated running cost: ${self.running_cost:.4f} ({tokens_used} tokens)")
+    
+    def _extract_page_with_gpt4o(self, image_path: str, page_num: int) -> Dict[str, Any]:
+        """
+        Extract text + tables + bounding boxes from single page using GPT-4o mini
+        
+        Args:
+            image_path: Path to page image
+            page_num: Page number
+            
+        Returns:
+            Dict with text, tables, and bounding boxes
+        """
+        try:
+            # Encode image
+            img_base64 = self._encode_image(image_path)
+            
+            # Prepare API request
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json"
+            }
+            
+            # Prompt engineered for table extraction + bounding boxes
+            prompt = """Extract all content from this document page. Return JSON with:
+
+1. "text_blocks": Array of {text, bbox: [x0, y0, x1, y1], type: "header"|"paragraph"|"list"}
+2. "tables": Array of {headers: [], rows: [[cell1, cell2, ...]], bbox: [x0, y0, x1, y1]}
+3. "page_number": <number>
+
+For bounding boxes, use pixel coordinates from top-left origin.
+Preserve table structure - do NOT flatten to text.
+Return ONLY valid JSON, no markdown."""
+
+            payload = {
+                "model": self.model_name,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": f"data:image/png;base64,{img_base64}"}
+                            }
+                        ]
+                    }
+                ],
+                "max_tokens": 4000,
+                "temperature": 0.1
+            }
+            
+            # Call API
+            response = requests.post(self.api_endpoint, headers=headers, json=payload, timeout=120)
+            
+            if response.status_code == 200:
+                result = response.json()
+                content = result["choices"][0]["message"]["content"]
+                tokens_used = result.get("usage", {}).get("total_tokens", 0)
+                
+                # Parse JSON response
+                try:
+                    # Remove markdown code blocks if present
+                    content = content.replace("```json", "").replace("```", "").strip()
+                    extracted_data = json.loads(content)
+                except json.JSONDecodeError:
+                    logger.warning(f"Failed to parse JSON response for page {page_num}")
+                    extracted_data = {"text_blocks": [], "tables": [], "page_number": page_num}
+                
+                # Update cost
+                self._update_running_cost(tokens_used)
+                
+                return {
+                    "page": page_num,
+                    "text_blocks": extracted_data.get("text_blocks", []),
+                    "tables": extracted_data.get("tables", []),
+                    "tokens_used": tokens_used,
+                    "success": True
+                }
+            else:
+                logger.error(f"API error: {response.status_code} - {response.text}")
+                return {
+                    "page": page_num,
+                    "text_blocks": [],
+                    "tables": [],
+                    "tokens_used": 0,
+                    "success": False,
+                    "error": response.text
+                }
+                
+        except Exception as e:
+            logger.error(f"Page extraction failed: {e}")
+            return {
+                "page": page_num,
+                "text_blocks": [],
+                "tables": [],
+                "tokens_used": 0,
+                "success": False,
+                "error": str(e)
+            }
     
     def extract(self, pdf_path: str) -> ExtractedDocument:
         """
-        Extract document using OCR + Docling
+        Extract document using GPT-4o mini Vision API
         
         Args:
             pdf_path: Path to PDF file
             
         Returns:
-            ExtractedDocument with OCR'd content
-            
-        Raises:
-            BudgetExceededError: If extraction would exceed budget cap
+            ExtractedDocument with content, tables, and spatial provenance
         """
-        self._initialize()
-        logger.info(f"Strategy C: Extracting {pdf_path}")
+        logger.info(f"Strategy C: Extracting {pdf_path} with GPT-4o mini Vision")
         
-        # Check budget before extraction
         try:
-            import fitz  # PyMuPDF for page count
-            with fitz.open(pdf_path) as pdf:
-                page_count = len(pdf)
+            import fitz  # PyMuPDF for PDF → images
             
+            doc = fitz.open(pdf_path)
+            page_count = len(doc)
+            
+            # Check budget
             if not self._check_budget(page_count):
                 raise BudgetExceededError(
                     f"Extraction would exceed budget cap of ${self.budget_cap_usd}"
                 )
-        except ImportError:
-            logger.warning("PyMuPDF not installed. Skipping budget check.")
-        
-        try:
-            # Convert PDF with Docling (OCR mode)
-            result = self.docling.convert(pdf_path)
             
-            # Extract text content
-            content = result.document.export_to_text()
+            all_text_blocks = []
+            all_tables = []
+            page_markers = []
             
-            # If low text, use RapidOCR as fallback
-            if len(content) < 100 and self.ocr is not None:
-                logger.warning("Docling produced low text. Using RapidOCR fallback.")
-                content = self._ocr_fallback(pdf_path)
+            # Process each page
+            for page_num, page in enumerate(doc, 1):
+                logger.info(f"Processing page {page_num}/{page_count}")
+                
+                # Render page as image (2x zoom for clarity)
+                pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+                img_path = f"/tmp/page_{page_num}.png"
+                pix.save(img_path)
+                
+                # Extract with GPT-4o mini
+                result = self._extract_page_with_gpt4o(img_path, page_num)
+                
+                if result["success"]:
+                    # Add page marker
+                    page_markers.append(page_num)
+                    
+                    # Collect text blocks
+                    for block in result["text_blocks"]:
+                        block["page"] = page_num
+                        all_text_blocks.append(block)
+                    
+                    # Collect tables
+                    for table in result["tables"]:
+                        table["page"] = page_num
+                        all_tables.append(table)
+                
+                # Cleanup temp image
+                Path(img_path).unlink(missing_ok=True)
             
-            # Extract tables
-            tables = self._extract_tables(result)
+            doc.close()
             
-            # Extract figures
-            figures = self._extract_figures(result)
+            # Build content string from text blocks
+            content_parts = []
+            for block in all_text_blocks:
+                content_parts.append(block.get("text", ""))
+            content = "\n\n".join(content_parts)
             
-            # Create page markers
-            page_markers = self._create_page_markers(result)
+            # Format tables as JSON
+            tables_formatted = []
+            for table in all_tables:
+                tables_formatted.append({
+                    "headers": table.get("headers", []),
+                    "rows": table.get("rows", []),
+                    "bbox": table.get("bbox"),
+                    "page": table.get("page")
+                })
             
             # Calculate quality score
-            quality_score = self._calculate_quality(content, tables, figures)
+            quality_score = self._calculate_quality(content, tables_formatted, page_count)
             
-            # Update running cost
-            self._update_running_cost(len(page_markers))
+            logger.success(
+                f"Strategy C complete: {len(all_text_blocks)} text blocks, "
+                f"{len(all_tables)} tables, ${self.running_cost:.4f} spent"
+            )
             
             return ExtractedDocument(
                 doc_id=Path(pdf_path).stem,
                 source_path=pdf_path,
-                content=content,
-                tables=tables,
-                figures=figures,
+                content=content if content else "No content extracted",
+                tables=tables_formatted,
+                figures=[],
                 page_markers=page_markers,
                 extraction_strategy=self.strategy_name,
                 quality_score=quality_score
             )
             
+        except ImportError:
+            logger.error("PyMuPDF not installed. Install with: pip install pymupdf")
+            raise
         except Exception as e:
             logger.error(f"Strategy C extraction failed: {e}")
             raise
     
-    def _ocr_fallback(self, pdf_path: str) -> str:
-        """
-        Fallback to RapidOCR if Docling fails
-        
-        Args:
-            pdf_path: Path to PDF file
-            
-        Returns:
-            OCR'd text content
-        """
-        import fitz  # PyMuPDF
-        
-        text_parts = []
-        with fitz.open(pdf_path) as pdf:
-            for page_num, page in enumerate(pdf):
-                pix = page.get_pixmap()
-                img_data = pix.tobytes("png")
-                
-                # OCR the image
-                result, _ = self.ocr(img_data)
-                if result:
-                    page_text = " ".join([line[1] for line in result])
-                    text_parts.append(page_text)
-                    logger.debug(f"Page {page_num + 1}: OCR'd {len(page_text)} chars")
-        
-        return "\n".join(text_parts)
-    
-    def _extract_tables(self, result) -> List[Dict[str, Any]]:
-        """Extract tables with structure"""
-        tables = []
-        
-        try:
-            # Extract tables from Docling result
-            if hasattr(result, 'document') and hasattr(result.document, 'tables'):
-                for table in result.document.tables:
-                    table_data = {
-                        "rows": [],
-                        "bbox": table.bbox if hasattr(table, 'bbox') else None,
-                        "page_refs": [1]  # Would track actual pages
-                    }
-                    
-                    # Extract rows
-                    if hasattr(table, 'data'):
-                        for row in table.data:
-                            table_data["rows"].append([str(cell) for cell in row])
-                    
-                    tables.append(table_data)
-        except Exception as e:
-            logger.warning(f"Table extraction failed: {e}")
-        
-        return tables
-    
-    def _extract_figures(self, result) -> List[Dict[str, Any]]:
-        """Extract figures with captions"""
-        figures = []
-        
-        try:
-            # Extract figures from Docling result
-            if hasattr(result, 'document') and hasattr(result.document, 'figures'):
-                for figure in result.document.figures:
-                    figure_data = {
-                        "description": "",
-                        "caption": getattr(figure, 'caption', ''),
-                        "bbox": figure.bbox if hasattr(figure, 'bbox') else None,
-                        "page_refs": [1]  # Would track actual pages
-                    }
-                    figures.append(figure_data)
-        except Exception as e:
-            logger.warning(f"Figure extraction failed: {e}")
-        
-        return figures
-    
-    def _create_page_markers(self, result) -> List[int]:
-        """Create page boundary markers"""
-        markers = []
-        
-        try:
-            # Get page count from Docling result
-            if hasattr(result, 'document') and hasattr(result.document, 'pages'):
-                for i, page in enumerate(result.document.pages):
-                    markers.append(i + 1)
-        except Exception as e:
-            logger.warning(f"Page marker creation failed: {e}")
-            markers = [1]  # Default to single page
-        
-        return markers
-    
-    def _calculate_quality(self, content: str, tables: List, figures: List) -> float:
-        """
-        Calculate extraction quality score
-        
-        Args:
-            content: Extracted text content
-            tables: List of extracted tables
-            figures: List of extracted figures
-            
-        Returns:
-            Quality score (0.0-1.0)
-        """
+    def _calculate_quality(self, content: str, tables: List, page_count: int) -> float:
+        """Calculate extraction quality score"""
         if not content:
             return 0.0
         
         # Base score from content length
         base_score = min(len(content) / 10000, 1.0)
         
-        # OCR confidence bonus
-        ocr_bonus = 0.2  # Assume good OCR if we got content
+        # Table bonus
+        table_bonus = min(len(tables) / 5, 0.3)
         
-        # Structure bonus for tables/figures
-        structure_bonus = min((len(tables) + len(figures)) / 10, 0.3)
+        # Page coverage bonus
+        coverage_bonus = min(page_count / 10, 0.2)
         
-        quality = min(base_score + ocr_bonus + structure_bonus, 1.0)
+        quality = min(base_score + table_bonus + coverage_bonus, 1.0)
         
-        logger.debug(f"Quality score: {quality:.2f} (base: {base_score:.2f}, ocr: {ocr_bonus}, structure: {structure_bonus:.2f})")
+        logger.debug(f"Quality score: {quality:.2f}")
         
         return quality
     

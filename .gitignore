@@ -1,28 +1,53 @@
+@'
 # Python
 __pycache__/
 *.py[cod]
 *$py.class
+*.so
+.Python
 .venv/
 venv/
 ENV/
-.python-version
 
-# Project Specific - KEEP THESE (required deliverables)
-# .refinery/profiles/              ← KEEP (49 JSON files, ~50KB)
-# .refinery/extraction_ledger.jsonl ← KEEP (49 entries, ~20KB)
-# .refinery/*.csv                   ← KEEP (metrics, ~50KB)
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
 
-# Project Specific - EXCLUDE THESE (too large)
-.refinery_db/                       # Vector store (regenerable)
-output/refined/*.md                 # Generated markdown (regenerable)
-*.log                               # Log files (regenerable)
-image.png                           # Large images
-data/                               # Raw PDFs (client data)
+# Project specific - DO NOT COMMIT
+.refinery/
+.refinery_db/
+*.db
+*.jsonl
+*.log
+*.tmp
+*.temp
+image.png
+
+# Test/Debug files
+test_*.py
+verify_*.py
+check_*.py
+*_backup.py
+*.bak
+*.bak2
+*.bak3
+*_new.py
+
+# Build/output
+output/
+processors/
+scripts/
+examples/
+src/utils/
 
 # OS
 .DS_Store
 Thumbs.db
 
-# IDE
-.vscode/
-.idea/
+# Dependencies (if using uv)
+# uv.lock - actually KEEP this for reproducibility
+'@ | Out-File -FilePath ".gitignore" -Encoding UTF8
+
+Write-Host "✅ .gitignore updated!" -ForegroundColor Green

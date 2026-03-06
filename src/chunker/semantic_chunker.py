@@ -1,364 +1,384 @@
 """
-Phase 2 Task 3: Semantic Chunking Engine
+Semantic Chunker with Spatial Provenance
 
-Enforces 5 constitutional rules:
-1. Table cells never split from headers
-2. Figure captions stored as metadata
-3. Numbered lists kept as single LDU
-4. Section headers as parent metadata
-5. Cross-references resolved
+Every LDU preserves:
+- bounding_box (x0, y0, x1, y1) from pdfplumber
+- page_number from source
+- content_hash for audit trail
+- table_structure (headers + rows) for tables
+
+Unlike naive token-based chunking:
+- Tables stay intact with headers and rows preserved
+- Bounding boxes preserved from source
+- Page numbers tracked per chunk
+- Spatial proximity = semantic meaning
 """
 
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional
 from pathlib import Path
 import hashlib
+import json
 from loguru import logger
 
-from src.models.schemas import LogicalDocumentUnit, ProvenanceChain
+from src.models.schemas import LogicalDocumentUnit, ChunkType, BoundingBox
 
 
 class SemanticChunker:
     """
-    Phase 2: Semantic Chunking Engine
+    Structure-aware chunking that preserves spatial provenance
     
-    Converts ExtractedDocument into LogicalDocumentUnits (LDUs)
-    while enforcing 5 constitutional rules for RAG quality.
+    Key Features:
+    - Tables preserved with headers + rows (not flattened)
+    - Bounding boxes from pdfplumber for every LDU
+    - Page numbers tracked per chunk
+    - Content hash for audit trail
+    - Metadata for additional context
+    - OCR content support for scanned PDFs
     """
     
-    def __init__(self, max_chunk_size: int = 512, overlap: int = 50):
-        """
-        Initialize chunker
-        
-        Args:
-            max_chunk_size: Maximum tokens per chunk
-            overlap: Token overlap between chunks for context
-        """
-        self.max_chunk_size = max_chunk_size
+    def __init__(self, max_tokens: int = 512, overlap: int = 50):
+        self.max_tokens = max_tokens
         self.overlap = overlap
-        logger.info(f"SemanticChunker initialized (max: {max_chunk_size}, overlap: {overlap})")
+        logger.info(f"SemanticChunker initialized (max: {max_tokens}, overlap: {overlap})")
     
-    def chunk(self, document: Any) -> List[LogicalDocumentUnit]:
+    def chunk_with_provenance(
+        self, 
+        extracted_content: str, 
+        pdf_path: str,
+        doc_id: str
+    ) -> List[LogicalDocumentUnit]:
         """
-        Convert ExtractedDocument into LogicalDocumentUnits
+        Chunk content while preserving spatial provenance
+        
+        For scanned PDFs: Use extracted_content from OCR
+        For digital PDFs: Use pdfplumber extraction
         
         Args:
-            document: ExtractedDocument from strategy
+            extracted_content: Text from extraction (OCR or pdfplumber)
+            pdf_path: Path to source PDF
+            doc_id: Document identifier
             
         Returns:
-            List of LogicalDocumentUnit with full provenance
+            List[LogicalDocumentUnit] with bounding boxes, page refs, and table structure
         """
-        logger.info(f"Chunking document: {document.doc_id}")
+        import pdfplumber
         
         ldus = []
         
-        # Rule 1: Extract tables with headers (never split)
-        table_ldus = self._extract_tables(document)
-        ldus.extend(table_ldus)
-        
-        # Rule 2: Extract figures with captions (keep together)
-        figure_ldus = self._extract_figures(document)
-        ldus.extend(figure_ldus)
-        
-        # Rule 3: Extract lists as single units
-        list_ldus = self._extract_lists(document)
-        ldus.extend(list_ldus)
-        
-        # Rule 4: Extract text sections with headers as metadata
-        text_ldus = self._extract_text_sections(document)
-        ldus.extend(text_ldus)
-        
-        # Rule 5: Resolve cross-references
-        ldus = self._resolve_cross_references(ldus, document)
-        
-        logger.success(f"Chunking complete: {len(ldus)} LDUs created")
-        
-        return ldus
-    
-    def _extract_tables(self, document: Any) -> List[LogicalDocumentUnit]:
-        """
-        Rule 1: Extract tables with headers (never split)
-        
-        Each table is kept as a single LDU with:
-        - Full table content
-        - Header row preserved
-        - Page references
-        - Bounding box
-        """
-        ldus = []
-        
-        tables = getattr(document, 'tables', [])
-        for table in tables:
-            # Get table content
-            content = self._format_table(table)
+        # ========== PRIORITY 1: USE OCR-EXTRACTED CONTENT ==========
+        # For scanned PDFs, extracted_content comes from OCR (Strategy B)
+        if extracted_content and len(extracted_content.strip()) > 50:
+            logger.info(f"Using OCR-extracted content ({len(extracted_content)} chars)")
             
-            # Calculate content hash
-            content_hash = hashlib.sha256(content.encode()).hexdigest()[:16]
+            try:
+                with pdfplumber.open(pdf_path) as pdf:
+                    if len(pdf.pages) > 0:
+                        page = pdf.pages[0]
+                        words = page.extract_words()
+                        
+                        # Calculate bounding box
+                        if words:
+                            x0 = min(w['x0'] for w in words)
+                            y0 = min(w['top'] for w in words)
+                            x1 = max(w['x1'] for w in words)
+                            y1 = max(w['bottom'] for w in words)
+                            bbox = BoundingBox(x0=x0, y0=y0, x1=x1, y1=y1)
+                        else:
+                            # Full page bbox as fallback
+                            bbox = BoundingBox(x0=0, y0=0, x1=page.width, y1=page.height)
+                        
+                        content_hash = hashlib.sha256(extracted_content[:500].encode()).hexdigest()[:16]
+                        
+                        ldu = LogicalDocumentUnit(
+                            content=extracted_content,
+                            chunk_type=ChunkType.TEXT,
+                            page_refs=[1],  # Single page (OCR extracted page)
+                            bounding_box=bbox,
+                            parent_section="Page 1",
+                            token_count=len(extracted_content.split()) // 4,
+                            content_hash=content_hash,
+                            source_doc=doc_id,
+                            metadata={
+                                "char_count": len(extracted_content),
+                                "source": "ocr",
+                                "bbox_source": "words"
+                            }
+                        )
+                        ldus.append(ldu)
+                        logger.info(f"Created 1 LDU from OCR content")
+                        
+            except Exception as e:
+                logger.error(f"Error processing OCR content: {e}")
+        
+        # ========== PRIORITY 2: FALLBACK TO PDFPLUMBER ==========
+        # For digital PDFs with embedded text
+        if not ldus:
+            logger.info(f"OCR content empty, trying pdfplumber extraction")
             
-            # Get page refs and bbox
-            page_refs = table.get('page_refs', [1])
-            bbox = tuple(table.get('bbox', [0, 0, 0, 0]))
-            
-            ldu = LogicalDocumentUnit(
-                content=content,
-                chunk_type="table",
-                page_refs=page_refs,
-                bounding_box=bbox,
-                parent_section=table.get('section', "Tables"),
-                token_count=len(content) // 4,  # Approximate
-                content_hash=content_hash,
-                source_doc=document.doc_id
-            )
-            ldus.append(ldu)
-        
-        return ldus
-    
-    def _extract_figures(self, document: Any) -> List[LogicalDocumentUnit]:
-        """
-        Rule 2: Extract figures with captions (keep together)
-        
-        Each figure + caption is kept as a single LDU with:
-        - Figure description
-        - Caption text
-        - Page references
-        - Bounding box
-        """
-        ldus = []
-        
-        figures = getattr(document, 'figures', [])
-        for figure in figures:
-            # Combine figure + caption
-            caption = figure.get('caption', '')
-            content = f"[FIGURE]\n{figure.get('description', '')}\n\nCaption: {caption}"
-            
-            # Calculate content hash
-            content_hash = hashlib.sha256(content.encode()).hexdigest()[:16]
-            
-            # Get page refs and bbox
-            page_refs = figure.get('page_refs', [1])
-            bbox = tuple(figure.get('bbox', [0, 0, 0, 0]))
-            
-            ldu = LogicalDocumentUnit(
-                content=content,
-                chunk_type="figure",
-                page_refs=page_refs,
-                bounding_box=bbox,
-                parent_section=figure.get('section', "Figures"),
-                token_count=len(content) // 4,
-                content_hash=content_hash,
-                source_doc=document.doc_id
-            )
-            ldus.append(ldu)
-        
-        return ldus
-    
-    def _extract_lists(self, document: Any) -> List[LogicalDocumentUnit]:
-        """
-        Rule 3: Numbered lists kept as single LDU
-        
-        Each list is kept together (not split across chunks):
-        - Full list content
-        - List type (numbered/bulleted)
-        - Page references
-        """
-        ldus = []
-        
-        # Extract lists from content (simplified - would use regex in production)
-        content = getattr(document, 'content', '')
-        lines = content.split('\n')
-        
-        current_list = []
-        list_start_page = 1
-        
-        for i, line in enumerate(lines):
-            # Detect list items (numbered or bulleted)
-            is_list_item = line.strip().startswith(('1.', '2.', '3.', '•', '-', '*'))
-            
-            if is_list_item:
-                current_list.append(line)
-            else:
-                # End of list - create LDU if we have items
-                if len(current_list) >= 2:  # Only chunk if 2+ items
-                    list_content = '\n'.join(current_list)
-                    content_hash = hashlib.sha256(list_content.encode()).hexdigest()[:16]
+            try:
+                with pdfplumber.open(pdf_path) as pdf:
+                    logger.info(f"Processing {len(pdf.pages)} pages for {doc_id}")
                     
-                    ldu = LogicalDocumentUnit(
-                        content=list_content,
-                        chunk_type="list",
-                        page_refs=[list_start_page],
-                        bounding_box=None,
-                        parent_section="Lists",
-                        token_count=len(list_content) // 4,
-                        content_hash=content_hash,
-                        source_doc=document.doc_id
-                    )
-                    ldus.append(ldu)
-                
-                current_list = []
-                list_start_page = (i // 50) + 1  # Approximate page
-        
-        # Don't forget last list
-        if len(current_list) >= 2:
-            list_content = '\n'.join(current_list)
-            content_hash = hashlib.sha256(list_content.encode()).hexdigest()[:16]
+                    for page_num, page in enumerate(pdf.pages, 1):
+                        logger.debug(f"Processing page {page_num}")
+                        
+                        # ========== TEXT EXTRACTION WITH BBOX ==========
+                        words = page.extract_words()
+                        page_text = page.extract_text() or ""
+                        
+                        if len(page_text.strip()) > 50 and words:
+                            # Calculate bounding box for page text
+                            x0 = min(w['x0'] for w in words)
+                            y0 = min(w['top'] for w in words)
+                            x1 = max(w['x1'] for w in words)
+                            y1 = max(w['bottom'] for w in words)
+                            
+                            bbox = BoundingBox(x0=x0, y0=y0, x1=x1, y1=y1)
+                            content_hash = hashlib.sha256(page_text[:500].encode()).hexdigest()[:16]
+                            
+                            ldu = LogicalDocumentUnit(
+                                content=page_text[:500],
+                                chunk_type=ChunkType.TEXT,
+                                page_refs=[page_num],
+                                bounding_box=bbox,
+                                parent_section=f"Page {page_num}",
+                                token_count=len(page_text.split()) // 4,
+                                content_hash=content_hash,
+                                source_doc=doc_id,
+                                metadata={
+                                    "word_count": len(words),
+                                    "char_count": len(page_text),
+                                    "bbox_source": "words"
+                                }
+                            )
+                            ldus.append(ldu)
+                            logger.debug(f"  Added TEXT LDU for page {page_num} ({len(page_text)} chars)")
+                        
+                        # ========== TABLE EXTRACTION WITH STRUCTURE ==========
+                        tables = page.find_tables()
+                        
+                        for table_num, table in enumerate(tables):
+                            table_data = table.extract()
+                            
+                            if table_data and len(table_data) >= 2:
+                                structured_table = {
+                                    "headers": table_data[0] if table_data[0] else [],
+                                    "rows": table_data[1:] if len(table_data) > 1 else [],
+                                    "num_columns": len(table_data[0]) if table_data[0] else 0,
+                                    "num_rows": len(table_data) - 1 if len(table_data) > 1 else 0
+                                }
+                                
+                                table_json = json.dumps(structured_table, ensure_ascii=False)
+                                content_hash = hashlib.sha256(table_json.encode()).hexdigest()[:16]
+                                
+                                if hasattr(table, 'bbox') and table.bbox:
+                                    bbox = BoundingBox(
+                                        x0=table.bbox[0],
+                                        y0=table.bbox[1],
+                                        x1=table.bbox[2],
+                                        y1=table.bbox[3]
+                                    )
+                                else:
+                                    bbox = None
+                                
+                                ldu = LogicalDocumentUnit(
+                                    content=table_json,
+                                    chunk_type=ChunkType.TABLE,
+                                    page_refs=[page_num],
+                                    bounding_box=bbox,
+                                    parent_section=f"Table {table_num + 1} - Page {page_num}",
+                                    token_count=len(table_json.split()) // 4,
+                                    content_hash=content_hash,
+                                    source_doc=doc_id,
+                                    metadata={
+                                        "table_structure": True,
+                                        "headers": structured_table["headers"],
+                                        "num_columns": structured_table["num_columns"],
+                                        "num_rows": structured_table["num_rows"],
+                                        "bbox_source": "table"
+                                    }
+                                )
+                                ldus.append(ldu)
+                                logger.debug(
+                                    f"  Added TABLE LDU for page {page_num}, table {table_num + 1} "
+                                    f"({structured_table['num_rows']} rows x {structured_table['num_columns']} cols)"
+                                )
+                        
+                        # ========== LIST EXTRACTION ==========
+                        if page_text:
+                            lines = page_text.split('\n')
+                            list_items = []
+                            list_bbox_words = []
+                            
+                            for line in lines:
+                                stripped = line.strip()
+                                if stripped.startswith(('•', '-', '*', '◦', '▪')) or stripped.startswith(tuple(f"{i}." for i in range(1, 100))):
+                                    list_items.append(stripped)
+                            
+                            if len(list_items) >= 3:
+                                list_text = json.dumps({"items": list_items, "type": "bullet_list"})
+                                content_hash = hashlib.sha256(list_text.encode()).hexdigest()[:16]
+                                
+                                bbox = None
+                                
+                                ldu = LogicalDocumentUnit(
+                                    content=list_text,
+                                    chunk_type=ChunkType.LIST,
+                                    page_refs=[page_num],
+                                    bounding_box=bbox,
+                                    parent_section=f"List - Page {page_num}",
+                                    token_count=len(list_text.split()) // 4,
+                                    content_hash=content_hash,
+                                    source_doc=doc_id,
+                                    metadata={
+                                        "list_structure": True,
+                                        "num_items": len(list_items),
+                                        "bbox_source": "list_words"
+                                    }
+                                )
+                                ldus.append(ldu)
+                                logger.debug(f"  Added LIST LDU for page {page_num} ({len(list_items)} items)")
+                        
+                        # ========== HEADER EXTRACTION ==========
+                        if page.chars:
+                            chars_by_line = {}
+                            for char in page.chars:
+                                line_key = round(char.get('top', 0) / 10) * 10
+                                if line_key not in chars_by_line:
+                                    chars_by_line[line_key] = []
+                                chars_by_line[line_key].append(char)
+                            
+                            for line_key, chars in chars_by_line.items():
+                                if chars:
+                                    avg_size = sum(c.get('size', 12) for c in chars) / len(chars)
+                                    if avg_size > 14:
+                                        header_text = ''.join(c.get('text', '') for c in chars).strip()
+                                        if len(header_text) > 5 and len(header_text) < 200:
+                                            x0 = min(c.get('x0', 0) for c in chars)
+                                            y0 = min(c.get('top', 0) for c in chars)
+                                            x1 = max(c.get('x1', 0) for c in chars)
+                                            y1 = max(c.get('bottom', 0) for c in chars)
+                                            
+                                            bbox = BoundingBox(x0=x0, y0=y0, x1=x1, y1=y1)
+                                            content_hash = hashlib.sha256(header_text.encode()).hexdigest()[:16]
+                                            
+                                            ldu = LogicalDocumentUnit(
+                                                content=header_text,
+                                                chunk_type=ChunkType.HEADER,
+                                                page_refs=[page_num],
+                                                bounding_box=bbox,
+                                                parent_section=f"Header - Page {page_num}",
+                                                token_count=len(header_text.split()) // 4,
+                                                content_hash=content_hash,
+                                                source_doc=doc_id,
+                                                metadata={
+                                                    "header_structure": True,
+                                                    "font_size": avg_size,
+                                                    "bbox_source": "chars"
+                                                }
+                                            )
+                                            ldus.append(ldu)
+                                            logger.debug(f"  Added HEADER LDU for page {page_num} ({len(header_text)} chars)")
             
-            ldu = LogicalDocumentUnit(
-                content=list_content,
-                chunk_type="list",
-                page_refs=[list_start_page],
-                bounding_box=None,
-                parent_section="Lists",
-                token_count=len(list_content) // 4,
-                content_hash=content_hash,
-                source_doc=document.doc_id
-            )
-            ldus.append(ldu)
+            except Exception as e:
+                logger.error(f"Error chunking with provenance: {e}")
+                import traceback
+                traceback.print_exc()
+                # Fallback: create simple LDUs without bbox
+                ldus = self._fallback_chunk(extracted_content, doc_id)
         
+        logger.info(f"Created {len(ldus)} LDUs with spatial provenance for {doc_id}")
         return ldus
     
-    def _extract_text_sections(self, document: Any) -> List[LogicalDocumentUnit]:
-        """
-        Rule 4: Section headers as parent metadata
-        
-        Text is chunked with section headers preserved as metadata:
-        - Section title in parent_section
-        - Content split at max_chunk_size
-        - Overlap for context continuity
-        """
+    def _fallback_chunk(self, content: str, doc_id: str) -> List[LogicalDocumentUnit]:
+        """Fallback chunking if pdfplumber fails"""
         ldus = []
+        chunks = content.split('\n\n')[:10]
         
-        content = getattr(document, 'content', '')
-        
-        # Split by section headers (simplified - would use regex in production)
-        sections = self._split_by_sections(content)
-        
-        for section_title, section_content in sections:
-            # Chunk section content
-            chunks = self._chunk_text(section_content)
-            
-            for i, chunk in enumerate(chunks):
+        for i, chunk in enumerate(chunks):
+            if len(chunk.strip()) > 50:
                 content_hash = hashlib.sha256(chunk.encode()).hexdigest()[:16]
-                
                 ldu = LogicalDocumentUnit(
-                    content=chunk,
-                    chunk_type="text",
-                    page_refs=[i + 1],  # Approximate
+                    content=chunk[:500],
+                    chunk_type=ChunkType.TEXT,
+                    page_refs=[i+1],
                     bounding_box=None,
-                    parent_section=section_title,
-                    token_count=len(chunk) // 4,
+                    parent_section="Section",
+                    token_count=len(chunk.split()) // 4,
                     content_hash=content_hash,
-                    source_doc=document.doc_id
+                    source_doc=doc_id,
+                    metadata={"fallback": True}
                 )
                 ldus.append(ldu)
         
+        logger.warning(f"Fallback chunking created {len(ldus)} LDUs without bbox")
         return ldus
-    
-    def _split_by_sections(self, content: str) -> List[Tuple[str, str]]:
-        """Split content by section headers"""
-        sections = []
-        current_section = "Introduction"
-        current_content = []
-        
-        for line in content.split('\n'):
-            # Detect section headers (simplified)
-            if line.strip().startswith('#') or (line.isupper() and len(line) < 100):
-                # Save previous section
-                if current_content:
-                    sections.append((current_section, '\n'.join(current_content)))
-                # Start new section
-                current_section = line.strip('#').strip()
-                current_content = []
-            else:
-                current_content.append(line)
-        
-        # Don't forget last section
-        if current_content:
-            sections.append((current_section, '\n'.join(current_content)))
-        
-        return sections if sections else [("Introduction", content)]
-    
-    def _chunk_text(self, text: str) -> List[str]:
-        """Split text into chunks with overlap"""
-        chunks = []
-        
-        # Simple character-based chunking (would use tokenizer in production)
-        start = 0
-        while start < len(text):
-            end = start + self.max_chunk_size * 4  # Approximate chars
-            chunk = text[start:end]
-            
-            # Try to break at sentence boundary
-            if end < len(text):
-                last_period = chunk.rfind('.')
-                if last_period > self.max_chunk_size * 2:
-                    chunk = chunk[:last_period + 1]
-            
-            chunks.append(chunk.strip())
-            start = end - self.overlap * 4  # Overlap
-        
-        return chunks
-    
-    def _resolve_cross_references(self, ldus: List[LogicalDocumentUnit], document: Any) -> List[LogicalDocumentUnit]:
-        """
-        Rule 5: Resolve cross-references
-        
-        Links references like "see Table 3" or "as shown in Figure 2"
-        to the actual LDU content.
-        """
-        # Build index of tables and figures
-        table_index = {f"Table {i+1}": ldu for i, ldu in enumerate(ldus) if ldu.chunk_type == "table"}
-        figure_index = {f"Figure {i+1}": ldu for i, ldu in enumerate(ldus) if ldu.chunk_type == "figure"}
-        
-        # Update LDUs with cross-references (simplified)
-        for ldu in ldus:
-            if ldu.chunk_type == "text":
-                # Check for references
-                for table_name, table_ldu in table_index.items():
-                    if table_name in ldu.content:
-                        # Add reference metadata (would store in DB in production)
-                        pass
-                
-                for figure_name, figure_ldu in figure_index.items():
-                    if figure_name in ldu.content:
-                        # Add reference metadata
-                        pass
-        
-        return ldus
-    
-    def _format_table(self, table: Dict) -> str:
-        """Format table as markdown"""
-        rows = table.get('rows', [])
-        if not rows:
-            return ""
-        
-        # Header
-        header = rows[0] if rows else []
-        markdown = "| " + " | ".join(str(cell) for cell in header) + " |\n"
-        markdown += "| " + " | ".join("---" for _ in header) + " |\n"
-        
-        # Body
-        for row in rows[1:]:
-            markdown += "| " + " | ".join(str(cell) for cell in row) + " |\n"
-        
-        return markdown
     
     def get_statistics(self, ldus: List[LogicalDocumentUnit]) -> Dict[str, Any]:
         """Get chunking statistics"""
-        stats = {
-            "total_ldus": len(ldus),
-            "by_type": {},
-            "avg_token_count": 0,
-            "total_tokens": 0
-        }
+        if not ldus:
+            return {
+                "total_ldus": 0,
+                "total_tokens": 0,
+                "by_type": {},
+                "with_bbox": 0,
+                "pages_covered": 0,
+                "tables_with_structure": 0,
+                "lists_with_structure": 0,
+                "headers_with_structure": 0,
+                "avg_tokens_per_ldu": 0
+            }
+        
+        by_type = {}
+        tables_with_structure = 0
+        lists_with_structure = 0
+        headers_with_structure = 0
         
         for ldu in ldus:
-            # Count by type
-            chunk_type = ldu.chunk_type
-            stats["by_type"][chunk_type] = stats["by_type"].get(chunk_type, 0) + 1
+            chunk_type = str(ldu.chunk_type)
+            by_type[chunk_type] = by_type.get(chunk_type, 0) + 1
             
-            # Sum tokens
-            stats["total_tokens"] += ldu.token_count
+            if ldu.metadata:
+                if ldu.metadata.get("table_structure"):
+                    tables_with_structure += 1
+                if ldu.metadata.get("list_structure"):
+                    lists_with_structure += 1
+                if ldu.metadata.get("header_structure"):
+                    headers_with_structure += 1
         
-        if ldus:
-            stats["avg_token_count"] = stats["total_tokens"] // len(ldus)
+        return {
+            "total_ldus": len(ldus),
+            "total_tokens": sum(ldu.token_count for ldu in ldus),
+            "by_type": by_type,
+            "with_bbox": sum(1 for ldu in ldus if ldu.bounding_box),
+            "pages_covered": len(set(page for ldu in ldus for page in ldu.page_refs)),
+            "tables_with_structure": tables_with_structure,
+            "lists_with_structure": lists_with_structure,
+            "headers_with_structure": headers_with_structure,
+            "avg_tokens_per_ldu": sum(ldu.token_count for ldu in ldus) / len(ldus) if ldus else 0
+        }
+    
+    def export_ldus_to_json(self, ldus: List[LogicalDocumentUnit], output_path: str):
+        """Export LDUs to JSON file for inspection"""
+        output_file = Path(output_path)
+        output_file.parent.mkdir(parents=True, exist_ok=True)
         
-        return stats
+        export_data = []
+        for ldu in ldus:
+            export_data.append({
+                "content": ldu.content[:200],
+                "chunk_type": str(ldu.chunk_type),
+                "page_refs": ldu.page_refs,
+                "bounding_box": ldu.bounding_box.to_list if ldu.bounding_box else None,
+                "content_hash": ldu.content_hash,
+                "source_doc": ldu.source_doc,
+                "parent_section": ldu.parent_section,
+                "token_count": ldu.token_count,
+                "metadata": ldu.metadata
+            })
+        
+        with open(output_file, 'w', encoding='utf-8') as f:
+            json.dump(export_data, f, indent=2, ensure_ascii=False)
+        
+        logger.info(f"Exported {len(ldus)} LDUs to {output_file}")
+        return output_file

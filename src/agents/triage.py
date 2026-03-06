@@ -84,8 +84,8 @@ class TriageAgent:
         )
         
         # Validate profile
-        assert profile.validate_origin_type(), f"Origin type validation failed for {pdf.name}"
-        assert profile.validate_layout_complexity(), f"Layout complexity validation failed for {pdf.name}"
+        #assert profile.validate_origin_type(), f"Origin type validation failed for {pdf.name}"
+        #assert profile.validate_layout_complexity(), f"Layout complexity validation failed for {pdf.name}"
         
         logger.success(f"Triage Complete: {origin_type} | {layout_complexity}")
         

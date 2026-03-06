@@ -1,121 +1,111 @@
+﻿#!/usr/bin/env python3
 """
-Phase 2 Task 1: Strategy B - Layout-Aware Extraction
+Strategy B: Layout-Aware OCR (OFFLINE VERSION)
 
-Uses Docling for structure-aware document extraction.
-Preserves tables, figures, and layout information.
+Uses RapidOCR for text extraction from scanned/mixed PDFs.
+100% Local - No Network Required.
 """
 
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 from loguru import logger
+import fitz  # PyMuPDF
+from rapidocr_onnxruntime import RapidOCR
 
-from src.strategies.base import BaseExtractor
-from src.models.schemas import ExtractedDocument, LogicalDocumentUnit
+from src.models.schemas import ExtractedDocument, BoundingBox
 
 
-class LayoutAwareExtractor(BaseExtractor):
-    """
-    Strategy B: Layout-Aware Extraction using Docling
-    
-    Best for:
-    - Table-heavy documents
-    - Multi-column layouts
-    - Mixed format PDFs
-    """
+class LayoutAwareExtractor:
+    """Extract text from scanned/mixed PDFs using RapidOCR (offline)"""
     
     def __init__(self):
-        super().__init__(
-            strategy_name="strategy_b",
-            cost_per_page=0.00,
-            confidence_threshold=0.75
-        )
-        self.docling = None
-    
-    def _initialize(self):
-        """Lazy-load Docling"""
-        if self.docling is None:
-            try:
-                from docling.document_converter import DocumentConverter
-                self.docling = DocumentConverter()
-                logger.info("Docling initialized successfully")
-            except ImportError:
-                logger.error("Docling not installed. Run: pip install docling")
-                raise
+        self.confidence_threshold = 0.75
+        self.cost_per_page = 0.00
+        self.ocr = RapidOCR()
+        logger.info("LayoutAwareExtractor initialized (RapidOCR, offline)")
     
     def extract(self, pdf_path: str) -> ExtractedDocument:
-        """
-        Extract document structure using Docling
+        """Extract text from PDF using OCR"""
+        logger.info(f"Extracting with RapidOCR: {pdf_path}")
         
-        Args:
-            pdf_path: Path to PDF file
-            
-        Returns:
-            ExtractedDocument with full structure
-        """
-        self._initialize()
-        logger.info(f"Strategy B: Extracting {pdf_path}")
-        
-        try:
-            # Convert PDF with Docling
-            result = self.docling.convert(pdf_path)
-            
-            # Extract text content
-            content = result.document.export_to_text()
-            
-            # Extract tables
-            tables = self._extract_tables(result)
-            
-            # Extract figures
-            figures = self._extract_figures(result)
-            
-            # Create page markers
-            page_markers = self._create_page_markers(result)
-            
-            # Calculate quality score
-            quality_score = self._calculate_quality(content, tables, figures)
-            
-            return ExtractedDocument(
-                doc_id=Path(pdf_path).stem,
-                source_path=pdf_path,
-                content=content,
-                tables=tables,
-                figures=figures,
-                page_markers=page_markers,
-                extraction_strategy=self.strategy_name,
-                quality_score=quality_score
-            )
-            
-        except Exception as e:
-            logger.error(f"Strategy B extraction failed: {e}")
-            raise
-    
-    def _extract_tables(self, result) -> List[Dict[str, Any]]:
-        """Extract tables with structure"""
+        all_text_parts = []
+        page_markers = []
         tables = []
-        # Implement table extraction from Docling result
-        return tables
-    
-    def _extract_figures(self, result) -> List[Dict[str, Any]]:
-        """Extract figures with captions"""
         figures = []
-        # Implement figure extraction from Docling result
-        return figures
+        
+        # Open PDF
+        pdf = fitz.open(pdf_path)
+        
+        # FIXED: Use range(len(pdf)) instead of pdf.pages
+        for page_num in range(len(pdf)):
+            page = pdf[page_num]
+            actual_page = page_num + 1
+            logger.debug(f"Processing page {actual_page}")
+            
+            # Convert page to image for OCR
+            mat = fitz.Matrix(2.0, 2.0)  # 2x scale for better OCR
+            pix = page.get_pixmap(matrix=mat)
+            
+            # Save temp image
+            img_path = Path(f".refinery/debug/ocr_page_{actual_page}.png")
+            img_path.parent.mkdir(parents=True, exist_ok=True)
+            pix.save(str(img_path))
+            
+            # Run OCR
+            result, _ = self.ocr(str(img_path))
+            
+            if result:
+                # Extract text from OCR results
+                page_text = "\n".join([r[1] for r in result])
+                
+                if page_text.strip():
+                    all_text_parts.append(page_text)
+                    page_markers.append(actual_page)
+                    
+                    # Check for figure captions
+                    for r in result:
+                        text = r[1]
+                        if 'Figure' in text or 'Fig.' in text:
+                            figures.append({
+                                'caption': text[:200],
+                                'page': actual_page,
+                                'bbox': r[0]
+                            })
+            
+            # Clean up temp image
+            try:
+                img_path.unlink()
+            except:
+                pass
+        
+        pdf.close()
+        
+        # Combine all text
+        content = "\n\n".join(all_text_parts)
+        
+        # Calculate quality score
+        if content:
+            space_ratio = content.count(' ') / max(len(content), 1)
+            quality = min(space_ratio / 0.18, 1.0) * 0.5 + 0.3
+            if len(content) > 100:
+                quality = min(quality + 0.2, 1.0)
+        else:
+            quality = 0.1
+        
+        logger.info(f"OCR extracted {len(content)} chars from {len(page_markers)} pages")
+        
+        # Return ExtractedDocument
+        return ExtractedDocument(
+            doc_id=Path(pdf_path).stem,
+            source_path=pdf_path,
+            content=content,
+            tables=tables,
+            figures=figures,
+            page_markers=page_markers,
+            extraction_strategy="strategy_b",
+            quality_score=quality
+        )
     
-    def _create_page_markers(self, result) -> List[int]:
-        """Create page boundary markers"""
-        markers = []
-        # Implement page marker creation
-        return markers
-    
-    def _calculate_quality(self, content: str, tables: List, figures: List) -> float:
-        """Calculate extraction quality score"""
-        if not content:
-            return 0.0
-        
-        # Base score from content length
-        base_score = min(len(content) / 10000, 1.0)
-        
-        # Bonus for tables/figures
-        structure_bonus = min((len(tables) + len(figures)) / 10, 0.3)
-        
-        return min(base_score + structure_bonus, 1.0)
+    def get_cost_estimate(self, page_count: int) -> float:
+        """Strategy B is free (local OCR)"""
+        return 0.00

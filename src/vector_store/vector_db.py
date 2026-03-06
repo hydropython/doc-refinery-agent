@@ -1,250 +1,199 @@
 """
-Phase 2 Task 6: Vector Store Integration
+Vector Store: LanceDB Backend for LDU Embeddings
 
-Uses LanceDB for semantic search over LDUs.
-Supports hybrid search (keyword + vector).
+Stores LDUs with embeddings for semantic search.
+Every LDU is embedded and stored with full provenance metadata.
 """
 
-from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
+from typing import List, Dict, Any, Optional
 from loguru import logger
 
-import hashlib
+from src.models.schemas import LogicalDocumentUnit
 
 
 class VectorStore:
     """
-    Phase 2: Vector Store for LDUs
+    LanceDB vector store for LDU embeddings
     
-    Stores embeddings for semantic search.
-    Uses LanceDB (local, fast, no API required).
+    Schema:
+    - id: Unique identifier
+    - content: LDU text content
+    - vector: Embedding (384-dimensional)
+    - chunk_type: TEXT, TABLE, LIST, HEADER, etc.
+    - page_refs: List of page numbers
+    - bounding_box: JSON string of [x0, y0, x1, y1]
+    - content_hash: SHA256 for audit trail
+    - source_doc: Document ID
+    - metadata: JSON with additional context
     """
     
     def __init__(self, db_path: str = ".refinery_db/lancedb"):
-        """
-        Initialize vector store
-        
-        Args:
-            db_path: Path to LanceDB database
-        """
         self.db_path = Path(db_path)
         self.db = None
         self.table = None
+        self.model = None
         logger.info(f"VectorStore initialized (path: {db_path})")
     
+    def _load_embedding_model(self):
+        """Load sentence transformer for embeddings"""
+        try:
+            from sentence_transformers import SentenceTransformer
+            self.model = SentenceTransformer('all-MiniLM-L6-v2')
+            logger.debug("Embedding model loaded: all-MiniLM-L6-v2")
+        except ImportError:
+            logger.warning("sentence-transformers not installed. Using mock embeddings.")
+            self.model = None
+    
+    def _generate_embedding(self, text: str) -> List[float]:
+        """Generate embedding for text"""
+        if self.model is None:
+            self._load_embedding_model()
+        
+        if self.model:
+            embedding = self.model.encode(text, convert_to_numpy=True).tolist()
+            return embedding
+        else:
+            # Mock embedding (384 dimensions)
+            import hashlib
+            hash_bytes = hashlib.sha256(text.encode()).digest()
+            # Expand to 384 dimensions
+            embedding = list(hash_bytes) * 12  # 32 * 12 = 384
+            return embedding[:384]
+    
     def connect(self):
-        """Connect to LanceDB"""
+        """Connect to LanceDB with proper schema"""
         try:
             import lancedb
-            self.db = lancedb.connect(self.db_path)
+            import pyarrow as pa
             
-            # Create or open table
-            if "ldus" not in self.db.table_names():
-                self._create_table()
-            else:
+            self.db = lancedb.connect(str(self.db_path))
+            
+            # Define proper schema with vector field
+            schema = pa.schema([
+                pa.field("id", pa.string()),
+                pa.field("content", pa.string()),
+                pa.field("vector", pa.list_(pa.float32(), 384)),  # Required for LanceDB
+                pa.field("chunk_type", pa.string()),
+                pa.field("page_refs", pa.string()),  # Store as JSON string
+                pa.field("bounding_box", pa.string()),  # Store as JSON string
+                pa.field("content_hash", pa.string()),
+                pa.field("source_doc", pa.string()),
+                pa.field("metadata", pa.string())  # Store as JSON string
+            ])
+            
+            try:
                 self.table = self.db.open_table("ldus")
+                logger.info(f"Opened existing table: ldus")
+            except Exception:
+                self.table = self.db.create_table("ldus", schema=schema)
+                logger.info(f"Created new table: ldus")
             
-            logger.success("Connected to LanceDB")
+            logger.info(f"Connected to LanceDB: {self.db_path}")
             
-        except ImportError:
-            logger.warning("LanceDB not installed. Using in-memory store.")
-            self.table = InMemoryTable()
         except Exception as e:
             logger.error(f"Failed to connect to LanceDB: {e}")
-            self.table = InMemoryTable()
+            self.table = None
     
-    def _create_table(self):
-        """Create LDU table schema"""
-        schema = {
-            "id": "string",
-            "content": "string",
-            "vector": "vector",
-            "doc_id": "string",
-            "chunk_type": "string",
-            "page_refs": "string",
-            "parent_section": "string",
-            "content_hash": "string",
-            "source_doc": "string"
-        }
-        self.table = self.db.create_table("ldus", schema=schema)
-    
-    def add_ldus(self, ldus: List[Any], embeddings: Optional[List[List[float]]] = None):
-        """
-        Add LDUs to vector store
-        
-        Args:
-            ldus: List of LogicalDocumentUnit
-            embeddings: Optional pre-computed embeddings
-        """
+    def add_ldus(self, ldus: List[LogicalDocumentUnit]):
+        """Add LDUs to vector store with embeddings"""
         if self.table is None:
             self.connect()
         
+        if self.table is None:
+            logger.error("Cannot add LDUs: table not available")
+            return
+        
+        import json
+        
         records = []
         for i, ldu in enumerate(ldus):
-            # Get or compute embedding
-            if embeddings:
-                vector = embeddings[i]
-            else:
-                vector = self._compute_embedding(ldu.content)
+            # Generate embedding
+            embedding = self._generate_embedding(ldu.content)
             
+            # Create record
             record = {
-                "id": f"{ldu.source_doc}_{i}",
-                "content": ldu.content,
-                "vector": vector,
-                "doc_id": ldu.source_doc,
-                "chunk_type": ldu.chunk_type,
-                "page_refs": str(ldu.page_refs),
-                "parent_section": ldu.parent_section,
+                "id": f"{ldu.source_doc}_{i}_{ldu.content_hash}",
+                "content": ldu.content[:8000],  # Truncate if too long
+                "vector": embedding,
+                "chunk_type": str(ldu.chunk_type),
+                "page_refs": json.dumps(ldu.page_refs),
+                "bounding_box": json.dumps(ldu.bounding_box.to_list) if ldu.bounding_box else "null",
                 "content_hash": ldu.content_hash,
-                "source_doc": ldu.source_doc
+                "source_doc": ldu.source_doc,
+                "metadata": json.dumps(ldu.metadata) if ldu.metadata else "{}"
             }
             records.append(record)
         
         # Add to table
         self.table.add(records)
-        logger.success(f"Added {len(records)} LDUs to vector store")
+        logger.info(f"Added {len(records)} LDUs to vector store")
     
-    def search(self, query: str, top_k: int = 10) -> List[Dict[str, Any]]:
-        """
-        Semantic search
-        
-        Args:
-            query: Search query
-            top_k: Number of results
-            
-        Returns:
-            List of matching LDUs with scores
-        """
+    def search(self, query: str, k: int = 5) -> List[Dict[str, Any]]:
+        """Semantic search for similar LDUs"""
         if self.table is None:
             self.connect()
         
-        # Compute query embedding
-        query_vector = self._compute_embedding(query)
+        if self.table is None:
+            return []
+        
+        # Generate query embedding
+        query_embedding = self._generate_embedding(query)
         
         # Search
-        results = self.table.search(query_vector).limit(top_k).to_list()
+        results = self.table.search(query_embedding).limit(k).to_list()
         
-        logger.info(f"Search returned {len(results)} results")
+        # Parse results
+        parsed_results = []
+        for r in results:
+            parsed_results.append({
+                "id": r["id"],
+                "content": r["content"],
+                "chunk_type": r["chunk_type"],
+                "page_refs": json.loads(r["page_refs"]) if r["page_refs"] else [],
+                "bounding_box": json.loads(r["bounding_box"]) if r["bounding_box"] else None,
+                "content_hash": r["content_hash"],
+                "source_doc": r["source_doc"],
+                "score": r.get("_distance", 0.0)
+            })
         
-        return results
-    
-    def hybrid_search(
-        self,
-        query: str,
-        filter_dict: Optional[Dict[str, Any]] = None,
-        top_k: int = 10
-    ) -> List[Dict[str, Any]]:
-        """
-        Hybrid search (vector + keyword + filter)
-        
-        Args:
-            query: Search query
-            filter_dict: Optional filters (e.g., {"chunk_type": "table"})
-            top_k: Number of results
-            
-        Returns:
-            List of matching LDUs with scores
-        """
-        if self.table is None:
-            self.connect()
-        
-        # Compute query embedding
-        query_vector = self._compute_embedding(query)
-        
-        # Build filter
-        where_clause = None
-        if filter_dict:
-            conditions = []
-            for key, value in filter_dict.items():
-                conditions.append(f"{key} = '{value}'")
-            where_clause = " AND ".join(conditions)
-        
-        # Search with filter
-        if where_clause:
-            results = self.table.search(query_vector).where(where_clause).limit(top_k).to_list()
-        else:
-            results = self.table.search(query_vector).limit(top_k).to_list()
-        
-        logger.info(f"Hybrid search returned {len(results)} results")
-        
-        return results
-    
-    def _compute_embedding(self, text: str) -> List[float]:
-        """
-        Compute embedding for text
-        
-        In production, use sentence-transformers or OpenAI embeddings.
-        For now, use simple hash-based embedding (placeholder).
-        """
-        # Placeholder: hash-based embedding (NOT semantic!)
-        # In production: from sentence_transformers import SentenceTransformer
-        # model = SentenceTransformer('all-MiniLM-L6-v2')
-        # embedding = model.encode(text).tolist()
-        
-        # Simple hash-based placeholder
-        hash_bytes = hashlib.md5(text.encode()).digest()
-        # Expand to 384 dimensions (typical embedding size)
-        embedding = list(hash_bytes) * 24  # 16 * 24 = 384
-        embedding = embedding[:384]
-        # Normalize to float
-        embedding = [float(x) / 256.0 for x in embedding]
-        
-        return embedding
-    
-    def delete_document(self, doc_id: str):
-        """Delete all LDUs for a document"""
-        if self.table is None:
-            self.connect()
-        
-        self.table.delete(f"doc_id = '{doc_id}'")
-        logger.info(f"Deleted document: {doc_id}")
+        return parsed_results
     
     def get_statistics(self) -> Dict[str, Any]:
-        """Get vector store statistics"""
+        """Get database statistics"""
         if self.table is None:
             self.connect()
         
-        count = self.table.count_rows()
+        if self.table is None:
+            return {"total_ldus": 0, "db_path": str(self.db_path)}
+        
+        try:
+            # Count rows
+            count = self.table.count_rows()
+        except:
+            count = 0
         
         return {
             "total_ldus": count,
             "db_path": str(self.db_path),
             "table_name": "ldus"
         }
-
-
-class InMemoryTable:
-    """Fallback in-memory table when LanceDB is not available"""
     
-    def __init__(self):
-        self.records = []
+    def clear(self):
+        """Clear all data from vector store"""
+        if self.table is None:
+            self.connect()
+        
+        if self.table is None:
+            return
+        
+        # Drop and recreate table
+        self.db.drop_table("ldus")
+        self.connect()
+        logger.info("Vector store cleared")
     
-    def add(self, records: List[Dict]):
-        self.records.extend(records)
-    
-    def search(self, query_vector):
-        return self
-    
-    def limit(self, top_k):
-        return self
-    
-    def to_list(self):
-        return self.records[:10]
-    
-    def count_rows(self):
-        return len(self.records)
-    
-    def delete(self, condition):
-        pass  # Simplified
-
-
-# Singleton instance
-_vector_store = None
-
-def get_vector_store() -> VectorStore:
-    """Get or create vector store singleton"""
-    global _vector_store
-    if _vector_store is None:
-        _vector_store = VectorStore()
-        _vector_store.connect()
-    return _vector_store
+    def close(self):
+        """Close database connection"""
+        self.db = None
+        self.table = None
+        logger.debug("Vector store connection closed")

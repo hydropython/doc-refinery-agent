@@ -10,6 +10,7 @@ CONFIGURATION: Loads thresholds from rubric/extraction_rules.yaml
 from typing import Optional, Tuple
 from pathlib import Path
 from loguru import logger
+from src.utils.ocr_postprocess import fix_word_boundaries, calculate_space_ratio
 
 try:
     import yaml
@@ -21,8 +22,9 @@ from src.strategies.base import BaseExtractor
 from src.strategies.fast_text import FastTextExtractor
 from src.strategies.layout_aware import LayoutAwareExtractor
 from src.strategies.vision_ocr import VisionOCRExtractor
-from src.models.schemas import ExtractedDocument, DocumentProfile
-
+from src.models.schemas import OriginType, ExtractedDocument, DocumentProfile
+from loguru import logger
+from src.utils.ocr_postprocess import fix_word_boundaries
 
 class ExtractionRouter:
     """
@@ -80,27 +82,40 @@ class ExtractionRouter:
             f"B={self.threshold_b}, C={self.threshold_c}, budget=${self.max_budget_usd})"
         )
     
+   # Find the extract() method and modify strategy selection
+
     def extract(self, pdf_path: str, profile: DocumentProfile) -> Tuple[ExtractedDocument, str]:
         """
-        Extract with confidence-gated routing
+        Extract with confidence-gated escalation
         
-        ESCALATION PATH: A → B → C (never skip)
-        
-        Exception: If origin_type is 'scanned_image' or 'form_fillable', start from B
-        (Strategy A won't work on scanned docs)
+        STRATEGY PRIORITY (Cost-Optimized):
+        1. Strategy A (Fast Text) - $0.00, try first
+        2. Strategy B (Layout-Aware) - $0.00, fallback for scanned/tables
+        3. Strategy C (Vision) - DISABLED (not needed for 95% quality)
         """
+        
         logger.info(f"Routing extraction for {pdf_path}")
         logger.info(f"Profile: {profile.origin_type} | {profile.layout_complexity}")
         
-        # DECISION: Where to start escalation?
-        if profile.origin_type in ["scanned_image", "form_fillable"]:
-            # Scanned/form docs: Start from B (A won't work)
+        # COST-OPTIMIZED ROUTING (Strategy C Disabled)
+        if profile.origin_type == OriginType.NATIVE_DIGITAL:
+            # Digital documents: try Strategy A first
+            logger.info("Digital document: Starting from Strategy A")
+            try:
+                return self._try_strategy_a(pdf_path, profile)
+            except Exception as e:
+                logger.warning(f"Strategy A failed: {e}")
+                logger.info("Falling back to Strategy B")
+                return self._try_strategy_b(pdf_path, profile)
+        
+        else:
+            # Scanned/Mixed: go directly to Strategy B (skip A, disable C)
             logger.info("Scanned/form document: Starting from Strategy B")
             return self._try_strategy_b(pdf_path, profile)
-        else:
-            # Digital/mixed docs: Always start from A
-            logger.info("Digital document: Starting from Strategy A")
-            return self._try_strategy_a(pdf_path, profile)
+        
+        # Strategy C REMOVED - not needed for 95% quality at $0.00
+        # logger.info("Strategy B failed, trying Strategy C (Vision)")
+        # return self._try_strategy_c(pdf_path)
     
     def _try_strategy_a(self, pdf_path: str, profile: DocumentProfile) -> Tuple[ExtractedDocument, str]:
         """Try Strategy A, escalate to B if confidence low"""
@@ -123,7 +138,7 @@ class ExtractionRouter:
             return self._try_strategy_b(pdf_path, profile)
     
     def _try_strategy_b(self, pdf_path: str, profile: DocumentProfile) -> Tuple[ExtractedDocument, str]:
-        """Try Strategy B, escalate to C if confidence low"""
+        """Try Strategy B (Layout-Aware OCR) - NO escalation to C"""
         logger.info("Trying Strategy B (Layout-Aware)")
         
         # Check budget
@@ -134,18 +149,24 @@ class ExtractionRouter:
         try:
             result = self.strategy_b.extract(pdf_path)
             
-            # Check confidence
-            if result.quality_score >= self.threshold_b:
-                logger.success(f"Strategy B succeeded (quality: {result.quality_score:.2f})")
-                return result, "strategy_b"
+            # Apply OCR post-processing to fix word boundaries
+            if result.content:
+                original_spaces = result.content.count(' ')
+                original_ratio = original_spaces / max(len(result.content), 1)
+                result.content = fix_word_boundaries(result.content)
+                fixed_spaces = result.content.count(' ')
+                fixed_ratio = fixed_spaces / max(len(result.content), 1)
+                logger.info(f"OCR Post-Process: {original_spaces}→{fixed_spaces} spaces, ratio: {original_ratio:.3f}→{fixed_ratio:.3f}")
             
-            # Low confidence - escalate to C
-            logger.warning(f"Strategy B low confidence ({result.quality_score:.2f} < {self.threshold_b}), escalating to C")
-            return self._try_strategy_c(pdf_path, profile)
+            # Check confidence - but DON'T escalate to C (local-only mode)
+            if result.quality_score < self.threshold_b:
+                logger.warning(f"Strategy B low confidence ({result.quality_score:.2f} < 0.75), but Strategy C disabled - using Strategy B results")
+            
+            return result, "strategy_b"
             
         except Exception as e:
             logger.error(f"Strategy B failed: {e}")
-            return self._try_strategy_c(pdf_path, profile)
+            raise RuntimeError(f"Strategy B failed for {pdf_path}: {e}")
     
     def _try_strategy_c(self, pdf_path: str, profile: DocumentProfile) -> Tuple[ExtractedDocument, str]:
         """Try Strategy C (final fallback)"""
