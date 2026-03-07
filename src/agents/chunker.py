@@ -102,7 +102,7 @@ class ChunkerAgent:
         ldus = []
         
         # Simple chunking by page (can be enhanced)
-        chars_per_page = max(len(text) // len(pages), 1)
+        chars_per_page = max(len(text) // max(len(pages), 1), 1)
         
         for i, page_num in enumerate(pages):
             start_idx = i * chars_per_page
@@ -165,3 +165,4 @@ class ChunkerAgent:
     def to_dict(self, ldus: List[LDU]) -> List[Dict]:
         """Convert LDUs to dict for LangGraph state"""
         return [ldu.model_dump() for ldu in ldus]
+

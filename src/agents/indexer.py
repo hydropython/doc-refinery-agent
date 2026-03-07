@@ -1,5 +1,5 @@
 ﻿"""
-Indexer Agent with PageIndex and Table Structure Support
+Indexer Agent with PageIndex Support
 Location: src/agents/indexer.py
 """
 
@@ -16,12 +16,12 @@ except ImportError:
 
 
 class SectionNode:
-    """Section in PageIndex with table support"""
+    """Section in PageIndex"""
     
     def __init__(self, title: str):
         self.title = title
         self.pages: List[int] = []
-        self.ldus: List[Dict] = []
+        self.ldus: List[Any] = []
         self.summary: str = ""
         self.tables: List[Dict] = []
     
@@ -41,7 +41,7 @@ class SectionNode:
         return {
             "title": self.title,
             "pages": self.pages,
-            "ldus": self.ldus,
+            "ldus": [ldu.__dict__ if hasattr(ldu, '__dict__') else ldu for ldu in self.ldus],
             "summary": self.summary,
             "tables": self.tables
         }
@@ -55,13 +55,20 @@ class PageIndex:
         self.doc_id: str = ""
         self.source_path: str = ""
     
-    def build_index(self, ldus: List[Dict]) -> None:
-        """Build PageIndex from LDUs"""
+    def build_index(self, ldus: List[Any]) -> None:
+        """Build PageIndex from LDUs (handles both dict and LDU objects)"""
         logger.info(f"Building PageIndex from {len(ldus)} LDUs...")
         
-        section_map: Dict[str, List[Dict]] = {}
+        section_map: Dict[str, List[Any]] = {}
         for ldu in ldus:
-            section = ldu.get("section", "General")
+            # Handle LDU object (pydantic) vs dict
+            if hasattr(ldu, 'section'):
+                section = ldu.section
+            elif isinstance(ldu, dict):
+                section = ldu.get("section", "General")
+            else:
+                section = "General"
+            
             if section not in section_map:
                 section_map[section] = []
             section_map[section].append(ldu)
@@ -69,7 +76,13 @@ class PageIndex:
         for title, section_ldus in section_map.items():
             node = SectionNode(title)
             for ldu in section_ldus:
-                node.pages.append(ldu.get("page", 0))
+                # Handle LDU object vs dict
+                if hasattr(ldu, 'page'):
+                    node.pages.append(ldu.page)
+                elif isinstance(ldu, dict):
+                    node.pages.append(ldu.get("page", 0))
+                else:
+                    node.pages.append(0)
                 node.ldus.append(ldu)
             self.sections[title] = node
         
@@ -107,27 +120,35 @@ class PageIndex:
         for i, (title, node) in enumerate(self.sections.items(), 1):
             print(f"    [{i}/{len(self.sections)}] {title}...", end=" ")
             
-            content = "\n".join([ldu.get("content", "")[:500] for ldu in node.ldus])
+            # Get content from LDUs
+            content_parts = []
+            for ldu in node.ldus:
+                if hasattr(ldu, 'content'):
+                    content_parts.append(ldu.content[:500])
+                elif isinstance(ldu, dict):
+                    content_parts.append(ldu.get("content", "")[:500])
+            
+            content = "\n".join(content_parts)[:1000]
             
             try:
                 response = client.chat.completions.create(
                     model="gpt-4o-mini",
                     messages=[
                         {"role": "system", "content": "Summarize in 1 sentence."},
-                        {"role": "user", "content": content[:1000]}
+                        {"role": "user", "content": content}
                     ],
                     max_tokens=50
                 )
                 node.summary = response.choices[0].message.content
-            except:
-                node.summary = "[Summary unavailable]"
+            except Exception as e:
+                node.summary = f"[Summary unavailable: {str(e)[:50]}]"
             
             print("Done")
         
         logger.info(f"Generated {len(self.sections)} summaries")
     
     def print_tree(self) -> None:
-        """Print PageIndex tree with tables"""
+        """Print PageIndex tree"""
         print("\n" + "="*70)
         print("  PAGEINDEX TREE")
         print("="*70)
@@ -135,16 +156,10 @@ class PageIndex:
         
         for title, node in self.sections.items():
             print(f"     {title}/")
-            print(f"        Summary: {node.summary[:60]}...")
+            summary_preview = node.summary[:60] + "..." if len(node.summary) > 60 else node.summary
+            print(f"        Summary: {summary_preview}")
             print(f"        Pages: {node.pages}")
             print(f"        LDUs: {len(node.ldus)}")
-            
-            if node.tables:
-                for table in node.tables:
-                    print(f"        Table {table['table_id']}:")
-                    print(f"           Rows: {table['rows']}, Columns: {table['columns']}")
-                    print(f"           Headers: {table['headers']}")
-                    print(f"           Cells: {len(table['cells'])} values")
         
         print("="*70)
     
@@ -172,7 +187,7 @@ class IndexerAgent:
         self.page_index = PageIndex()
         logger.info("IndexerAgent initialized (openai for summaries)")
     
-    def build_index(self, ldus: List[Dict]) -> None:
+    def build_index(self, ldus: List[Any]) -> None:
         """Build PageIndex from LDUs"""
         self.page_index.build_index(ldus)
     

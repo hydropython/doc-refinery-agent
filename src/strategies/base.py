@@ -1,4 +1,4 @@
-"""
+﻿"""
 Phase 2: Base Extractor Class
 
 Abstract base class for all extraction strategies.
@@ -40,12 +40,14 @@ class BaseExtractor(ABC):
         logger.debug(f"BaseExtractor initialized: {strategy_name}")
     
     @abstractmethod
-    def extract(self, pdf_path: str) -> ExtractedDocument:
+    def extract(self, pdf_path: str, page_range: Optional[List[int]] = None) -> ExtractedDocument:
         """
         Extract content from PDF
         
         Args:
             pdf_path: Path to PDF file
+            page_range: Optional list of pages to extract (e.g., [27, 28, 29])
+                      If None, extracts all pages
             
         Returns:
             ExtractedDocument with full content and structure
