@@ -1,144 +1,194 @@
 ﻿"""
-PageIndex Indexer Agent
+Indexer Agent with PageIndex and Table Structure Support
 Location: src/agents/indexer.py
-
-Builds PageIndex tree with LLM-generated section summaries.
-Supports navigation without vector search.
 """
 
-import json
-from typing import List, Dict
+from typing import Dict, List, Any, Optional
 from pathlib import Path
-from datetime import datetime
+import json
 from loguru import logger
-from src.agents.summary_generator import SummaryGenerator
+
+try:
+    from openai import OpenAI
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
 
 
-class PageIndexNode:
-    """Node in PageIndex tree"""
+class SectionNode:
+    """Section in PageIndex with table support"""
     
-    def __init__(self, title: str, pages: List[int] = None, ldus: List[str] = None):
+    def __init__(self, title: str):
         self.title = title
-        self.summary: str = None
-        self.pages = pages or []
-        self.ldus = ldus or []
-        self.children: List["PageIndexNode"] = []
-        self.metadata = {}
+        self.pages: List[int] = []
+        self.ldus: List[Dict] = []
+        self.summary: str = ""
+        self.tables: List[Dict] = []
     
-    def to_dict(self) -> Dict:
+    def add_table(self, table_data: Dict):
+        """Add table with row/column structure"""
+        self.tables.append({
+            "table_id": f"Table_{len(self.tables) + 1}",
+            "rows": table_data.get("rows", 0),
+            "columns": table_data.get("columns", 0),
+            "headers": table_data.get("headers", []),
+            "cells": table_data.get("cells", []),
+            "bbox": table_data.get("bbox", []),
+            "page": table_data.get("page", 0)
+        })
+    
+    def dict(self) -> Dict:
         return {
             "title": self.title,
-            "summary": self.summary,
-            "pages": sorted(list(set(self.pages))),
+            "pages": self.pages,
             "ldus": self.ldus,
-            "metadata": self.metadata,
-            "children": [child.to_dict() for child in self.children]
+            "summary": self.summary,
+            "tables": self.tables
         }
 
 
-class IndexerAgent:
-    """
-    PageIndex Indexer Agent
+class PageIndex:
+    """PageIndex with table structure support"""
     
-    Usage:
-        agent = IndexerAgent()
-        page_index = agent.build_index(ldus)
-    """
+    def __init__(self):
+        self.sections: Dict[str, SectionNode] = {}
+        self.doc_id: str = ""
+        self.source_path: str = ""
     
-    def __init__(self, summary_provider: str = "openai"):
-        self.summary_generator = SummaryGenerator()
-        self.root = PageIndexNode(title="Document")
-        self.sections: Dict[str, PageIndexNode] = {}
-        logger.info(f"IndexerAgent initialized ({summary_provider} for summaries)")
-    
-    def build_index(self, ldus: List[Dict]) -> Dict:
-        """
-        Build PageIndex tree from LDUs
-        
-        Args:
-            ldus: List of LDU dicts
-        
-        Returns:
-            PageIndex tree dict
-        """
+    def build_index(self, ldus: List[Dict]) -> None:
+        """Build PageIndex from LDUs"""
         logger.info(f"Building PageIndex from {len(ldus)} LDUs...")
         
-        # Group LDUs by section
+        section_map: Dict[str, List[Dict]] = {}
         for ldu in ldus:
-            section_title = ldu.get("section", "Unclassified")
-            
-            if section_title not in self.sections:
-                node = PageIndexNode(title=section_title)
-                self.sections[section_title] = node
-                self.root.children.append(node)
-            
-            node = self.sections[section_title]
-            node.pages.append(ldu.get("page", 0))
-            node.ldus.append(ldu.get("id", ""))
-            node.metadata["content_preview"] = ldu.get("content", "")[:800]
+            section = ldu.get("section", "General")
+            if section not in section_map:
+                section_map[section] = []
+            section_map[section].append(ldu)
+        
+        for title, section_ldus in section_map.items():
+            node = SectionNode(title)
+            for ldu in section_ldus:
+                node.pages.append(ldu.get("page", 0))
+                node.ldus.append(ldu)
+            self.sections[title] = node
         
         logger.info(f"Created {len(self.sections)} sections")
-        return self.to_dict()
     
-    def add_summaries(self) -> None:
-        """Generate LLM summaries for all sections"""
+    def add_tables(self, tables: List[Dict]) -> None:
+        """Add table structure to PageIndex"""
+        logger.info(f"Adding {len(tables)} tables to PageIndex...")
+        
+        for table in tables:
+            page = table.get("page", 0)
+            section = table.get("section", "Tables & Figures")
+            
+            if section in self.sections:
+                self.sections[section].add_table(table)
+            else:
+                node = SectionNode(section)
+                node.pages = [page]
+                node.add_table(table)
+                self.sections[section] = node
+        
+        logger.info(f"Added {len(tables)} tables")
+    
+    def add_summaries(self, use_llm: bool = True) -> None:
+        """Generate summaries for sections"""
         logger.info("Generating LLM summaries for sections...")
         
-        sections_for_summary = []
-        for title, node in self.sections.items():
-            if not node.summary:
-                content = node.metadata.get("content_preview", f"Section: {title}")
-                sections_for_summary.append({
-                    "title": title,
-                    "content": content
-                })
+        if not use_llm or not OPENAI_AVAILABLE:
+            for section in self.sections.values():
+                section.summary = "[Summary disabled - offline mode]"
+            return
         
-        if sections_for_summary:
-            results = self.summary_generator.generate_batch(sections_for_summary)
-            for result in results:
-                self.sections[result["title"]].summary = result["summary"]
+        client = OpenAI()
         
-        logger.info(f"Generated {len(sections_for_summary)} summaries")
+        for i, (title, node) in enumerate(self.sections.items(), 1):
+            print(f"    [{i}/{len(self.sections)}] {title}...", end=" ")
+            
+            content = "\n".join([ldu.get("content", "")[:500] for ldu in node.ldus])
+            
+            try:
+                response = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {"role": "system", "content": "Summarize in 1 sentence."},
+                        {"role": "user", "content": content[:1000]}
+                    ],
+                    max_tokens=50
+                )
+                node.summary = response.choices[0].message.content
+            except:
+                node.summary = "[Summary unavailable]"
+            
+            print("Done")
+        
+        logger.info(f"Generated {len(self.sections)} summaries")
     
-    def to_dict(self) -> Dict:
-        """Convert tree to dictionary"""
-        return {
-            "document": "fta_performance_survey_final_report_2022.pdf",
-            "timestamp": datetime.now().isoformat(),
-            "total_sections": len(self.sections),
-            "tree": self.root.to_dict()
-        }
+    def print_tree(self) -> None:
+        """Print PageIndex tree with tables"""
+        print("\n" + "="*70)
+        print("  PAGEINDEX TREE")
+        print("="*70)
+        print("  Document/")
+        
+        for title, node in self.sections.items():
+            print(f"     {title}/")
+            print(f"        Summary: {node.summary[:60]}...")
+            print(f"        Pages: {node.pages}")
+            print(f"        LDUs: {len(node.ldus)}")
+            
+            if node.tables:
+                for table in node.tables:
+                    print(f"        Table {table['table_id']}:")
+                    print(f"           Rows: {table['rows']}, Columns: {table['columns']}")
+                    print(f"           Headers: {table['headers']}")
+                    print(f"           Cells: {len(table['cells'])} values")
+        
+        print("="*70)
     
     def save(self, output_path: str) -> str:
         """Save PageIndex to JSON"""
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        
+        data = {
+            "doc_id": self.doc_id,
+            "source_path": self.source_path,
+            "sections": {title: node.dict() for title, node in self.sections.items()}
+        }
+        
         with open(output_path, "w") as f:
-            json.dump(self.to_dict(), f, indent=2, default=str)
+            json.dump(data, f, indent=2, default=str)
+        
         logger.info(f"Saved PageIndex to {output_path}")
         return output_path
+
+
+class IndexerAgent:
+    """Indexer Agent wrapper - uses PageIndex internally"""
     
-    def navigate(self, section_title: str) -> Dict:
-        """Navigate to specific section"""
-        if section_title in self.sections:
-            node = self.sections[section_title]
-            return {
-                "title": node.title,
-                "summary": node.summary,
-                "pages": node.pages,
-                "ldus": node.ldus
-            }
-        return None
+    def __init__(self):
+        self.page_index = PageIndex()
+        logger.info("IndexerAgent initialized (openai for summaries)")
+    
+    def build_index(self, ldus: List[Dict]) -> None:
+        """Build PageIndex from LDUs"""
+        self.page_index.build_index(ldus)
+    
+    def add_summaries(self, use_llm: bool = True) -> None:
+        """Generate summaries"""
+        self.page_index.add_summaries(use_llm)
     
     def print_tree(self) -> None:
-        """Print tree visualization"""
-        print("\n" + "=" * 70)
-        print("  PAGEINDEX TREE")
-        print("=" * 70)
-        print("  Document/")
-        for node in self.root.children:
-            summary_preview = (node.summary[:50] + "...") if node.summary else "[No summary]"
-            print(f"     {node.title}/")
-            print(f"        Summary: {summary_preview}")
-            print(f"        Pages: {sorted(list(set(node.pages)))}")
-            print(f"        LDUs: {len(node.ldus)}")
-        print("=" * 70)
+        """Print PageIndex tree"""
+        self.page_index.print_tree()
+    
+    def save(self, output_path: str) -> str:
+        """Save PageIndex"""
+        return self.page_index.save(output_path)
+    
+    @property
+    def sections(self) -> Dict[str, SectionNode]:
+        """Access sections"""
+        return self.page_index.sections

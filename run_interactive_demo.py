@@ -1,4 +1,4 @@
-﻿"""
+"""
 Interactive Pipeline Demo - Asks After EACH Agent
 Location: run_interactive_demo.py
 """
@@ -31,7 +31,7 @@ def ask_continue(agent_name: str):
 
 def main():
     pdf_path = "data/fta_performance_survey_final_report_2022.pdf"
-    pages = [34]
+    pages = [27, 28, 29]
     
     print("\n" + "="*80)
     print("  DOCUMENT INTELLIGENCE REFINERY | INTERACTIVE MODE")
