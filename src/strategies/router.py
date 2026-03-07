@@ -1,96 +1,86 @@
 ﻿"""
-Extraction Router - WITH PAGE RANGE SUPPORT
-Location: src/strategies/router.py
+Extraction Router - Uses extraction_rules.yaml
 """
 
-from typing import Optional, Tuple, List
+import yaml
 from pathlib import Path
+from typing import List, Optional, Tuple
 from loguru import logger
-
-try:
-    import yaml
-    YAML_AVAILABLE = True
-except ImportError:
-    YAML_AVAILABLE = False
-
-from src.strategies.base import BaseExtractor
-from src.strategies.fast_text import FastTextExtractor
-from src.strategies.layout_aware import LayoutAwareExtractor
-from src.models.schemas import OriginType, ExtractedDocument, DocumentProfile
-from src.utils.ocr_postprocess import fix_word_boundaries
+from src.models.schemas import DocumentProfile, ExtractedDocument
 
 
 class ExtractionRouter:
-    """Extraction Router with page range support"""
+    def __init__(self, config_path: str = "rubric/extraction_rules.yaml"):
+        self.config_path = Path(config_path)
+        self.config = self._load_config()
+        self._init_strategies()
     
-    def __init__(self, config_path: str = "rubric/extraction_rules.yaml", max_budget_usd: float = 0.50):
-        self.threshold_a = 0.85
-        self.threshold_b = 0.75
-        self.max_budget_usd = max_budget_usd
-        
-        config_file = Path(config_path)
-        if config_file.exists() and YAML_AVAILABLE:
-            try:
-                with open(config_file) as f:
-                    config = yaml.safe_load(f)
-                self.threshold_a = config.get('confidence', {}).get('strategy_a_threshold', 0.85)
-                self.threshold_b = config.get('confidence', {}).get('strategy_b_threshold', 0.75)
-                logger.info(f"Loaded config from {config_path}")
-            except Exception as e:
-                logger.warning(f"Failed to load config: {e}. Using defaults.")
-        
-        self.strategy_a = FastTextExtractor()
-        self.strategy_b = LayoutAwareExtractor()
-        
-        logger.info(f"ExtractionRouter initialized (thresholds: A={self.threshold_a}, B={self.threshold_b})")
+    def _load_config(self) -> dict:
+        if self.config_path.exists():
+            with open(self.config_path, encoding="utf-8") as f:
+                return yaml.safe_load(f)
+        return {}
     
-    def extract(self, pdf_path: str, profile: DocumentProfile, page_range: Optional[List[int]] = None) -> Tuple[ExtractedDocument, str]:
-        """Extract with page range support"""
-        logger.info(f"Routing extraction for {pdf_path}")
-        logger.info(f"Profile: {profile.origin_type} | {profile.layout_complexity}")
-        logger.info(f"Page range: {page_range if page_range else 'ALL'}")
-        
-        if profile.origin_type == OriginType.NATIVE_DIGITAL:
-            logger.info("Digital document: Starting from Strategy A")
-            try:
-                return self._try_strategy_a(pdf_path, profile, page_range)
-            except Exception as e:
-                logger.warning(f"Strategy A failed: {e}")
-                return self._try_strategy_b(pdf_path, profile, page_range)
-        else:
-            logger.info("Scanned/form document: Starting from Strategy B")
-            return self._try_strategy_b(pdf_path, profile, page_range)
-    
-    def _try_strategy_a(self, pdf_path: str, profile: DocumentProfile, page_range: Optional[List[int]] = None) -> Tuple[ExtractedDocument, str]:
-        """Try Strategy A with page range"""
-        logger.info("Trying Strategy A (Fast Text)")
+    def _init_strategies(self):
+        self.strategy_a = None
+        self.strategy_b = None
         
         try:
-            result = self.strategy_a.extract(pdf_path, page_range=page_range)
-            
-            if result.quality_score >= self.threshold_a:
-                logger.success(f"Strategy A succeeded (quality: {result.quality_score:.2f})")
-                return result, "strategy_a"
-            
-            return self._try_strategy_b(pdf_path, profile, page_range)
-            
+            from src.strategies.fast_text import FastTextExtractor
+            self.strategy_a = FastTextExtractor()
+            logger.debug("Strategy A initialized")
         except Exception as e:
-            logger.error(f"Strategy A failed: {e}")
-            return self._try_strategy_b(pdf_path, profile, page_range)
-    
-    def _try_strategy_b(self, pdf_path: str, profile: DocumentProfile, page_range: Optional[List[int]] = None) -> Tuple[ExtractedDocument, str]:
-        """Try Strategy B WITH PAGE RANGE"""
-        logger.info("Trying Strategy B (Layout-Aware)")
+            logger.warning(f"Strategy A init failed: {e}")
         
         try:
-            # Pass page_range to strategy
-            result = self.strategy_b.extract(pdf_path, page_range=page_range)
-            
-            if result.content:
-                result.content = fix_word_boundaries(result.content)
-            
+            from src.strategies.layout_aware import LayoutAwareExtractor
+            self.strategy_b = LayoutAwareExtractor()
+            logger.debug("Strategy B initialized")
+        except Exception as e:
+            logger.warning(f"Strategy B init failed: {e}")
+    
+    def extract(self, pdf_path: str, profile: DocumentProfile, 
+                page_range: Optional[List[int]] = None,
+                force_strategy: str = None) -> Tuple[ExtractedDocument, str]:
+        
+        logger.info(f"Routing: {profile.origin_type.value} | {profile.layout_complexity.value}")
+        logger.info(f"Tables: {profile.table_count}, Images: {profile.images_found}")
+        
+        # Get thresholds from config
+        conf = self.config.get('confidence', {})
+        threshold_b = conf.get('strategy_b_threshold', 0.75)
+        
+        # TABLE-HEAVY  Strategy B (from config: trigger_table_heavy: true)
+        if profile.layout_complexity.value == 'table_heavy' or profile.table_count >= 3:
+            logger.info("Table-heavy (config rule)  Using Strategy B")
+            if self.strategy_b:
+                result = self.strategy_b.extract(pdf_path, page_range)
+                return result, "strategy_b"
+        
+        # SCANNED  Strategy B (from config: trigger_scanned: true)
+        if profile.origin_type.value == 'scanned_image':
+            logger.info("Scanned (config rule)  Using Strategy B")
+            if self.strategy_b:
+                result = self.strategy_b.extract(pdf_path, page_range)
+                return result, "strategy_b"
+        
+        # IMAGE-HEAVY  Strategy B
+        if profile.images_found >= 5:
+            logger.info("Image-heavy  Using Strategy B")
+            if self.strategy_b:
+                result = self.strategy_b.extract(pdf_path, page_range)
+                return result, "strategy_b"
+        
+        # DEFAULT  Strategy A
+        if self.strategy_a:
+            logger.info("Default  Using Strategy A")
+            result = self.strategy_a.extract(pdf_path, page_range)
+            return result, "strategy_a"
+        
+        # FALLBACK  Strategy B
+        if self.strategy_b:
+            logger.info("Fallback  Using Strategy B")
+            result = self.strategy_b.extract(pdf_path, page_range)
             return result, "strategy_b"
-            
-        except Exception as e:
-            logger.error(f"Strategy B failed: {e}")
-            raise RuntimeError(f"Strategy B failed for {pdf_path}: {e}")
+        
+        raise RuntimeError("All strategies failed")
