@@ -226,6 +226,7 @@ class LogicalDocumentUnit(BaseModel):
     content_hash: str  # ✅ SHA256 hash
     source_doc: str
     relationships: Optional[List[str]] = None  # ✅ Cross-refs
+    metadata: Optional[Dict[str, Any]] = {}  # ✅ NEW: For table structure, font size, etc.
     
     @validator('token_count')
     def token_count_non_negative(cls, v):
@@ -233,7 +234,6 @@ class LogicalDocumentUnit(BaseModel):
         if v < 0:
             raise ValueError('token_count must be non-negative')
         return v
-
 
 # =============================================================================
 # PHASE 4: PAGEINDEX & QUERY

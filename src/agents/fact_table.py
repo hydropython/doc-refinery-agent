@@ -1,41 +1,52 @@
-﻿
-"""
-Phase 4: FactTable Extractor
+﻿"""
+FactTable: SQLite Backend for Numerical Facts
 
-Extracts key-value facts from financial/numerical documents into SQLite.
-Enables precise SQL querying for numerical claims.
+Extracts key-value facts from financial documents for precise SQL querying.
+Used for audit verification and numerical claim checking.
 """
 
 import sqlite3
-import re
-from typing import List, Dict, Any, Optional
+import json
+import hashlib
 from pathlib import Path
+from typing import List, Dict, Any, Optional
 from loguru import logger
 
-from src.models.schemas import LogicalDocumentUnit
 
-
-class FactTableExtractor:
+class FactTable:
     """
-    Extract key-value facts into SQLite for precise querying
+    SQLite-backed fact storage for numerical data extraction
     
-    Example facts:
-    - revenue: $4.2B
-    - fiscal_year: 2023
-    - quarter: Q3
-    - net_income: $1.5B
+    Schema:
+    - id: Primary key
+    - doc_id: Source document ID
+    - fact_key: Named entity (e.g., "revenue", "assets")
+    - fact_value: Numerical or text value
+    - unit: Currency unit, percentage, etc.
+    - page_number: Source page
+    - bounding_box: [x0, y0, x1, y1] coordinates
+    - content_hash: SHA256 for audit trail
+    - metadata: JSON with additional context
     """
     
     def __init__(self, db_path: str = ".refinery/facts.db"):
         self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._init_db()
-        logger.info(f"FactTableExtractor initialized (db: {db_path})")
+        self.conn: Optional[sqlite3.Connection] = None
+        logger.info(f"FactTable initialized (path: {db_path})")
     
-    def _init_db(self):
-        """Create facts table"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
+    def connect(self):
+        """Connect to SQLite database and create tables"""
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.conn = sqlite3.connect(str(self.db_path))
+        self._create_tables()
+        logger.debug(f"Connected to FactTable: {self.db_path}")
+    
+    def _create_tables(self):
+        """Create facts table if not exists"""
+        if self.conn is None:
+            return
+        
+        cursor = self.conn.cursor()
         
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS facts (
@@ -43,195 +54,203 @@ class FactTableExtractor:
                 doc_id TEXT NOT NULL,
                 fact_key TEXT NOT NULL,
                 fact_value TEXT NOT NULL,
-                fact_type TEXT,
                 unit TEXT,
                 page_number INTEGER,
                 bounding_box TEXT,
-                content_hash TEXT,
-                source_text TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                content_hash TEXT NOT NULL,
+                metadata TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(doc_id, fact_key, fact_value, page_number)
             )
         """)
         
-        # Create indexes for fast querying
-        cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_doc_id ON facts(doc_id)
-        """)
+        # Create index for faster queries
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_fact_key ON facts(fact_key)
         """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_doc_id ON facts(doc_id)
+        """)
         
-        conn.commit()
-        conn.close()
-        logger.debug("FactTable database initialized")
+        self.conn.commit()
+        logger.debug("FactTable schema created")
     
-    def extract_facts(self, ldu: LogicalDocumentUnit) -> List[Dict[str, Any]]:
+    def add_fact(
+        self,
+        doc_id: str,
+        fact_key: str,
+        fact_value: str,
+        unit: Optional[str] = None,
+        page_number: Optional[int] = None,
+        bounding_box: Optional[List[float]] = None,
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> str:
         """
-        Extract facts from LDU using pattern matching
+        Add a fact to the database
         
-        Args:
-            ldu: LogicalDocumentUnit with content
-            
         Returns:
-            List of extracted facts
+            content_hash: SHA256 hash of the fact for audit trail
         """
-        facts = []
-        content = ldu.content
+        if self.conn is None:
+            self.connect()
         
-        # Pattern 1: Key-value pairs (e.g., "Revenue: $4.2B")
-        kv_pattern = r'([A-Za-z\s]+):\s*\$?([\d,.]+[BMK]?)'
-        for match in re.finditer(kv_pattern, content, re.IGNORECASE):
-            key = match.group(1).strip().lower().replace(' ', '_')
-            value = match.group(2).strip()
-            
-            fact = {
-                "doc_id": ldu.source_doc,
-                "fact_key": key,
-                "fact_value": value,
-                "fact_type": self._classify_fact_type(key),
-                "unit": self._extract_unit(value),
-                "page_number": ldu.page_refs[0] if ldu.page_refs else 1,
-                "bounding_box": str(ldu.bounding_box) if ldu.bounding_box else None,
-                "content_hash": ldu.content_hash,
-                "source_text": match.group(0)[:200]
-            }
-            facts.append(fact)
+        # Generate content hash for audit
+        content = f"{doc_id}:{fact_key}:{fact_value}:{page_number}"
+        content_hash = hashlib.sha256(content.encode()).hexdigest()[:16]
         
-        # Pattern 2: Financial metrics (e.g., "total revenue of $50M")
-        metric_pattern = r'(revenue|income|profit|assets|liabilities|equity)\s+(?:of\s+)?\$?([\d,.]+[BMK]?)'
-        for match in re.finditer(metric_pattern, content, re.IGNORECASE):
-            key = match.group(1).strip().lower()
-            value = match.group(2).strip()
-            
-            fact = {
-                "doc_id": ldu.source_doc,
-                "fact_key": key,
-                "fact_value": value,
-                "fact_type": "financial_metric",
-                "unit": self._extract_unit(value),
-                "page_number": ldu.page_refs[0] if ldu.page_refs else 1,
-                "bounding_box": str(ldu.bounding_box) if ldu.bounding_box else None,
-                "content_hash": ldu.content_hash,
-                "source_text": match.group(0)[:200]
-            }
-            facts.append(fact)
+        cursor = self.conn.cursor()
         
-        # Pattern 3: Fiscal periods (e.g., "FY 2023", "Q3 2024")
-        period_pattern = r'(FY|Fiscal\s+Year|Q[1-4])\s*(\d{4})'
-        for match in re.finditer(period_pattern, content, re.IGNORECASE):
-            key = f"{match.group(1).lower().replace(' ', '_')}_period"
-            value = f"{match.group(1)} {match.group(2)}"
-            
-            fact = {
-                "doc_id": ldu.source_doc,
-                "fact_key": key,
-                "fact_value": value,
-                "fact_type": "fiscal_period",
-                "unit": None,
-                "page_number": ldu.page_refs[0] if ldu.page_refs else 1,
-                "bounding_box": str(ldu.bounding_box) if ldu.bounding_box else None,
-                "content_hash": ldu.content_hash,
-                "source_text": match.group(0)[:200]
-            }
-            facts.append(fact)
-        
-        return facts
-    
-    def _classify_fact_type(self, key: str) -> str:
-        """Classify fact type based on key"""
-        key_lower = key.lower()
-        
-        if any(word in key_lower for word in ['revenue', 'income', 'profit']):
-            return "revenue_metric"
-        elif any(word in key_lower for word in ['asset', 'liability', 'equity']):
-            return "balance_sheet_metric"
-        elif any(word in key_lower for word in ['fiscal', 'year', 'quarter', 'q1', 'q2', 'q3', 'q4']):
-            return "fiscal_period"
-        elif any(word in key_lower for word in ['tax', 'expenditure']):
-            return "tax_metric"
-        else:
-            return "general"
-    
-    def _extract_unit(self, value: str) -> Optional[str]:
-        """Extract unit from value (e.g., $4.2B → B)"""
-        if 'B' in value.upper():
-            return "billions"
-        elif 'M' in value.upper():
-            return "millions"
-        elif 'K' in value.upper():
-            return "thousands"
-        return None
-    
-    def insert_facts(self, facts: List[Dict[str, Any]]):
-        """Insert facts into database"""
-        if not facts:
-            return
-        
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        for fact in facts:
+        try:
             cursor.execute("""
-                INSERT INTO facts (doc_id, fact_key, fact_value, fact_type, unit, 
-                                   page_number, bounding_box, content_hash, source_text)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT OR REPLACE INTO facts 
+                (doc_id, fact_key, fact_value, unit, page_number, bounding_box, content_hash, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, (
-                fact["doc_id"],
-                fact["fact_key"],
-                fact["fact_value"],
-                fact["fact_type"],
-                fact["unit"],
-                fact["page_number"],
-                fact["bounding_box"],
-                fact["content_hash"],
-                fact["source_text"]
+                doc_id,
+                fact_key,
+                fact_value,
+                unit,
+                page_number,
+                json.dumps(bounding_box) if bounding_box else None,
+                content_hash,
+                json.dumps(metadata) if metadata else None
             ))
-        
-        conn.commit()
-        conn.close()
-        logger.info(f"Inserted {len(facts)} facts into FactTable")
+            
+            self.conn.commit()
+            logger.debug(f"Added fact: {fact_key} = {fact_value}")
+            
+            return content_hash
+            
+        except sqlite3.Error as e:
+            logger.error(f"Failed to add fact: {e}")
+            self.conn.rollback()
+            return ""
     
-    def query_facts(self, key: str, doc_id: Optional[str] = None) -> List[Dict]:
+    def query_facts(self, keyword: str, doc_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """
-        Query facts by key
+        Query facts by keyword
         
         Args:
-            key: Fact key to search for
-            doc_id: Optional document ID filter
+            keyword: Search term (e.g., "revenue", "assets")
+            doc_id: Optional document filter
             
         Returns:
-            List of matching facts
+            List of facts matching the query
         """
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
+        if self.conn is None:
+            self.connect()
+        
+        cursor = self.conn.cursor()
         
         if doc_id:
             cursor.execute("""
                 SELECT * FROM facts 
-                WHERE fact_key = ? AND doc_id = ?
-                ORDER BY created_at DESC
-            """, (key, doc_id))
+                WHERE fact_key LIKE ? OR fact_value LIKE ?
+                AND doc_id = ?
+                ORDER BY page_number
+            """, (f"%{keyword}%", f"%{keyword}%", doc_id))
         else:
             cursor.execute("""
                 SELECT * FROM facts 
-                WHERE fact_key = ?
-                ORDER BY created_at DESC
-            """, (key,))
+                WHERE fact_key LIKE ? OR fact_value LIKE ?
+                ORDER BY page_number
+            """, (f"%{keyword}%", f"%{keyword}%"))
         
-        results = [dict(row) for row in cursor.fetchall()]
-        conn.close()
+        rows = cursor.fetchall()
         
-        return results
+        facts = []
+        for row in rows:
+            facts.append({
+                "id": row[0],
+                "doc_id": row[1],
+                "fact_key": row[2],
+                "fact_value": row[3],
+                "unit": row[4],
+                "page_number": row[5],
+                "bounding_box": json.loads(row[6]) if row[6] else None,
+                "content_hash": row[7],
+                "metadata": json.loads(row[8]) if row[8] else None
+            })
+        
+        logger.debug(f"Query '{keyword}' returned {len(facts)} facts")
+        
+        return facts
     
-    def get_all_facts(self, doc_id: str) -> List[Dict]:
+    def get_all_facts(self, doc_id: str) -> List[Dict[str, Any]]:
         """Get all facts for a document"""
-        return self.query_facts("%", doc_id)
+        if self.conn is None:
+            self.connect()
+        
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT * FROM facts WHERE doc_id = ? ORDER BY page_number
+        """, (doc_id,))
+        
+        rows = cursor.fetchall()
+        
+        facts = []
+        for row in rows:
+            facts.append({
+                "id": row[0],
+                "doc_id": row[1],
+                "fact_key": row[2],
+                "fact_value": row[3],
+                "unit": row[4],
+                "page_number": row[5],
+                "bounding_box": json.loads(row[6]) if row[6] else None,
+                "content_hash": row[7],
+                "metadata": json.loads(row[8]) if row[8] else None
+            })
+        
+        return facts
+    
+    def verify_claim(self, claim: str, doc_id: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Verify a claim against stored facts
+        
+        Args:
+            claim: Statement to verify (e.g., "Revenue was $4.2B")
+            doc_id: Optional document filter
+            
+        Returns:
+            Verification result with verdict
+        """
+        # Extract keywords from claim (simple implementation)
+        keywords = ["revenue", "profit", "assets", "liabilities", "tax", "expenditure"]
+        
+        matching_facts = []
+        for keyword in keywords:
+            if keyword in claim.lower():
+                facts = self.query_facts(keyword, doc_id)
+                matching_facts.extend(facts)
+        
+        if matching_facts:
+            return {
+                "claim": claim,
+                "verdict": "verified",
+                "facts": matching_facts,
+                "confidence": 0.8
+            }
+        else:
+            return {
+                "claim": claim,
+                "verdict": "unverifiable",
+                "facts": [],
+                "confidence": 0.0
+            }
+    
+    def close(self):
+        """Close database connection"""
+        if self.conn:
+            self.conn.close()
+            logger.debug("FactTable connection closed")
     
     def get_statistics(self) -> Dict[str, Any]:
-        """Get FactTable statistics"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
+        """Get database statistics"""
+        if self.conn is None:
+            self.connect()
+        
+        cursor = self.conn.cursor()
         
         cursor.execute("SELECT COUNT(*) FROM facts")
         total_facts = cursor.fetchone()[0]
@@ -239,14 +258,8 @@ class FactTableExtractor:
         cursor.execute("SELECT COUNT(DISTINCT doc_id) FROM facts")
         total_docs = cursor.fetchone()[0]
         
-        cursor.execute("SELECT fact_type, COUNT(*) FROM facts GROUP BY fact_type")
-        by_type = dict(cursor.fetchall())
-        
-        conn.close()
-        
         return {
             "total_facts": total_facts,
             "total_documents": total_docs,
-            "by_type": by_type,
             "db_path": str(self.db_path)
         }
