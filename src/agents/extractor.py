@@ -1,25 +1,43 @@
+﻿"""
+Extraction Agent - WITH PAGE RANGE SUPPORT
+Location: src/agents/extractor.py
+"""
+
 from loguru import logger
-from src.strategies.fast_text import FastTextExtractor
-from src.strategies.layout_aware import LayoutAwareExtractor
-from src.models.schemas import DocumentProfile, ExtractedDocument
+from src.strategies.router import ExtractionRouter
+from src.models.schemas import DocumentProfile, OriginType, ExtractedDocument
+from typing import Tuple, List, Optional
 
-class ExtractionRouter:
-    def __init__(self):
-        # Initialize the strategies
-        self.fast_extractor = FastTextExtractor()
-        self.layout_extractor = LayoutAwareExtractor()
 
-    def process(self, pdf_path: str, profile: DocumentProfile) -> ExtractedDocument:
-        # Decision Logic: The "Escalation Guard"
-        strategy_key = profile.estimated_cost_tier
+class ExtractionAgent:
+    """Extraction Agent with page range support"""
+    
+    def __init__(self, config_path: str = "rubric/extraction_rules.yaml"):
+        self.router = ExtractionRouter(config_path=config_path)
+        logger.info("ExtractionAgent initialized")
+    
+    def extract(self, pdf_path: str, profile: DocumentProfile, page_range: Optional[List[int]] = None) -> Tuple[ExtractedDocument, str]:
+        """
+        Extract content using router for strategy selection
         
-        logger.info(f"Routing {profile.doc_id} to Strategy: {strategy_key}")
+        Args:
+            pdf_path: Path to PDF file
+            profile: DocumentProfile from triage
+            page_range: List of page numbers to extract (1-indexed)
         
-        # Route based on triage results
-        if strategy_key == "fast_text":
-            return self.fast_extractor.extract(pdf_path)
-        elif strategy_key == "layout_model":
-            return self.layout_extractor.extract(pdf_path)
-        else:
-            logger.warning(f"Unknown strategy {strategy_key}. Falling back to LayoutAware.")
-            return self.layout_extractor.extract(pdf_path)
+        Returns:
+            Tuple of (ExtractedDocument, strategy_name)
+        """
+        logger.info(f"Extracting {pdf_path} with profile: {profile.origin_type}")
+        logger.info(f"Page range: {page_range if page_range else 'ALL'}")
+        
+        # Use router for confidence-gated strategy selection WITH PAGE RANGE
+        result, strategy = self.router.extract(pdf_path, profile, page_range)
+        
+        logger.info(f"Extraction complete via {strategy}")
+        
+        return result, strategy
+    
+    def get_cost_estimate(self, profile: DocumentProfile) -> float:
+        """Get estimated cost for extraction"""
+        return self.router.strategy_b.get_cost_estimate(profile.page_count)

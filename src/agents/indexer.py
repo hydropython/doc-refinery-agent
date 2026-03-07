@@ -1,30 +1,31 @@
 ﻿"""
-PageIndex Builder with Tree Visualization
-Location: src/chunker/page_index.py
+PageIndex Indexer Agent
+Location: src/agents/indexer.py
 
-Builds hierarchical section tree from LDUs.
-Each section gets a GPT-4 Mini summary.
+Builds PageIndex tree with LLM-generated section summaries.
+Supports navigation without vector search.
 """
 
 import json
-from typing import List, Dict, Optional
+from typing import List, Dict
 from pathlib import Path
 from datetime import datetime
+from loguru import logger
+from src.agents.summary_generator import SummaryGenerator
 
 
 class PageIndexNode:
-    """A node in the PageIndex tree"""
+    """Node in PageIndex tree"""
     
     def __init__(self, title: str, pages: List[int] = None, ldus: List[str] = None):
         self.title = title
-        self.summary: Optional[str] = None
+        self.summary: str = None
         self.pages = pages or []
         self.ldus = ldus or []
         self.children: List["PageIndexNode"] = []
         self.metadata = {}
     
     def to_dict(self) -> Dict:
-        """Convert to dictionary"""
         return {
             "title": self.title,
             "summary": self.summary,
@@ -33,42 +34,34 @@ class PageIndexNode:
             "metadata": self.metadata,
             "children": [child.to_dict() for child in self.children]
         }
-    
-    def print_tree(self, indent: int = 0) -> str:
-        """Print tree visualization"""
-        prefix = "  " * indent
-        summary_preview = (self.summary[:50] + "...") if self.summary else "[No summary]"
-        
-        lines = []
-        lines.append(f"{prefix} {self.title}")
-        lines.append(f"{prefix}   Summary: {summary_preview}")
-        lines.append(f"{prefix}   Pages: {sorted(list(set(self.pages)))}")
-        lines.append(f"{prefix}   LDUs: {len(self.ldus)}")
-        
-        for child in self.children:
-            lines.extend(child.print_tree(indent + 1).split("\n"))
-        
-        return "\n".join(lines)
 
 
-class PageIndexBuilder:
-    """Build PageIndex tree from LDUs"""
+class IndexerAgent:
+    """
+    PageIndex Indexer Agent
     
-    def __init__(self):
+    Usage:
+        agent = IndexerAgent()
+        page_index = agent.build_index(ldus)
+    """
+    
+    def __init__(self, summary_provider: str = "openai"):
+        self.summary_generator = SummaryGenerator()
         self.root = PageIndexNode(title="Document")
         self.sections: Dict[str, PageIndexNode] = {}
+        logger.info(f"IndexerAgent initialized ({summary_provider} for summaries)")
     
-    def build(self, ldus: List[Dict]) -> PageIndexNode:
+    def build_index(self, ldus: List[Dict]) -> Dict:
         """
         Build PageIndex tree from LDUs
         
         Args:
-            ldus: List of LDU dicts with page, section, content, id
+            ldus: List of LDU dicts
         
         Returns:
-            Root PageIndexNode
+            PageIndex tree dict
         """
-        print("\n  [PageIndex] Building section tree...")
+        logger.info(f"Building PageIndex from {len(ldus)} LDUs...")
         
         # Group LDUs by section
         for ldu in ldus:
@@ -82,18 +75,14 @@ class PageIndexBuilder:
             node = self.sections[section_title]
             node.pages.append(ldu.get("page", 0))
             node.ldus.append(ldu.get("id", ""))
-            
-            # Store content preview for summary
-            if "content_preview" not in node.metadata:
-                node.metadata["content_preview"] = ldu.get("content", "")[:800]
+            node.metadata["content_preview"] = ldu.get("content", "")[:800]
         
-        print(f"     Sections created: {len(self.sections)}")
-        
-        return self.root
+        logger.info(f"Created {len(self.sections)} sections")
+        return self.to_dict()
     
-    def add_summaries(self, summary_generator) -> None:
-        """Add GPT-4 Mini summaries to all sections"""
-        print("\n  [PageIndex] Generating section summaries...")
+    def add_summaries(self) -> None:
+        """Generate LLM summaries for all sections"""
+        logger.info("Generating LLM summaries for sections...")
         
         sections_for_summary = []
         for title, node in self.sections.items():
@@ -105,14 +94,14 @@ class PageIndexBuilder:
                 })
         
         if sections_for_summary:
-            results = summary_generator.generate_batch(sections_for_summary)
+            results = self.summary_generator.generate_batch(sections_for_summary)
             for result in results:
                 self.sections[result["title"]].summary = result["summary"]
         
-        print(f"     Summaries generated: {len(sections_for_summary)}")
+        logger.info(f"Generated {len(sections_for_summary)} summaries")
     
     def to_dict(self) -> Dict:
-        """Convert entire tree to dictionary"""
+        """Convert tree to dictionary"""
         return {
             "document": "fta_performance_survey_final_report_2022.pdf",
             "timestamp": datetime.now().isoformat(),
@@ -125,12 +114,31 @@ class PageIndexBuilder:
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
         with open(output_path, "w") as f:
             json.dump(self.to_dict(), f, indent=2, default=str)
+        logger.info(f"Saved PageIndex to {output_path}")
         return output_path
     
+    def navigate(self, section_title: str) -> Dict:
+        """Navigate to specific section"""
+        if section_title in self.sections:
+            node = self.sections[section_title]
+            return {
+                "title": node.title,
+                "summary": node.summary,
+                "pages": node.pages,
+                "ldus": node.ldus
+            }
+        return None
+    
     def print_tree(self) -> None:
-        """Print full tree visualization"""
+        """Print tree visualization"""
         print("\n" + "=" * 70)
         print("  PAGEINDEX TREE")
         print("=" * 70)
-        print(self.root.print_tree())
+        print("  Document/")
+        for node in self.root.children:
+            summary_preview = (node.summary[:50] + "...") if node.summary else "[No summary]"
+            print(f"     {node.title}/")
+            print(f"        Summary: {summary_preview}")
+            print(f"        Pages: {sorted(list(set(node.pages)))}")
+            print(f"        LDUs: {len(node.ldus)}")
         print("=" * 70)
